@@ -42,6 +42,7 @@ class RunState(TypedDict):
 
     # ── Combined output
     combined_result:      str
+    output_path:          str
     combined_score:       float
     broken_interfaces:    list[BrokenInterface]
 

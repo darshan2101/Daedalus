@@ -110,6 +110,14 @@ class GlobalCoordinator:
             await update_run_status(self.run_id, "running", self.state)
             console.print(f"[dim grey italic]  Wave {i} complete. Checkpoint saved.[/]\n")
 
+        console.print("[bold green]✅ All waves finished execution.[/]")
+        
+        console.print("\n[bold magenta]📦 Aggregating outputs...[/]")
+        from daedalus.aggregator import aggregate
+        self.state = aggregate(self.run_id, self.state, self.config)
+        
+        out_path = self.state.get("output_path", "unknown")
+        console.print(f"[bold green]✅ Aggregation complete. Output written to:[/] [white]{out_path}[/]")
+
         self.state["current_step"] = "evaluator"
         await update_run_status(self.run_id, "running", self.state)
-        console.print("[bold green]✅ All waves finished execution.[/]")

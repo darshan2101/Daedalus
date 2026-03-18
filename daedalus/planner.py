@@ -35,15 +35,44 @@ Rules:
 async def plan_goal(goal: str, preset: str, config: dict) -> dict:
     import asyncio
     
-    def _run_planner():
-        return _call_with_fallback(
-            ORCHESTRATOR_MODELS,
-            PLANNER_SYSTEM_PROMPT,
-            f"Goal: {goal}\nPreset: {preset}",
-            temperature=0.2
-        )
-        
-    raw = await asyncio.to_thread(_run_planner)
+    user_msg = f"Goal: {goal}\nPreset: {preset}"
+    raw = None
+    
+    # ── Try Ollama Cloud first (if configured and enabled) ────────────────
+    ollama_enabled = config.get("infra", {}).get("ollama_enabled", True)
+    ollama_roles = config.get("infra", {}).get("ollama_roles", ["planner", "reasoner"])
+    
+    if ollama_enabled and "planner" in ollama_roles:
+        try:
+            from infra.ollama_client import ollama_chat, is_configured as ollama_configured
+            from models import OLLAMA_PLANNER_MODELS
+            
+            if ollama_configured():
+                timeout = config.get("infra", {}).get("ollama_timeout_seconds", 120)
+                for model in OLLAMA_PLANNER_MODELS:
+                    print(f"  [trying ollama: {model}]")
+                    messages = [
+                        {"role": "system", "content": PLANNER_SYSTEM_PROMPT},
+                        {"role": "user", "content": user_msg},
+                    ]
+                    result = await ollama_chat(model, messages, temperature=0.2, timeout=float(timeout))
+                    if result is not None:
+                        print(f"  [success ollama: {model}]")
+                        raw = result
+                        break
+        except Exception as e:
+            print(f"  [Ollama unavailable: {e} — falling to OpenRouter]")
+    
+    # ── Fall back to OpenRouter waterfall ─────────────────────────────────
+    if raw is None:
+        def _run_planner():
+            return _call_with_fallback(
+                ORCHESTRATOR_MODELS,
+                PLANNER_SYSTEM_PROMPT,
+                user_msg,
+                temperature=0.2
+            )
+        raw = await asyncio.to_thread(_run_planner)
     parsed = _parse_json(raw)
     
     if "agent_specs" not in parsed:

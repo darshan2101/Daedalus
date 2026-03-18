@@ -92,3 +92,29 @@ EVALUATOR_MODELS = [
     "meta-llama/llama-3.3-70b-instruct:free",
     "openrouter/free",
 ]
+
+# ── Ollama Cloud Models ─────────────────────────────────────────────────────
+# Accessed via https://ollama.com API — requires OLLAMA_API_KEY
+# Used as quality fallback for high-complexity roles only
+# Free tier: session + weekly limits apply.
+# Model names per /api/tags (no '-cloud' suffix for API access)
+
+OLLAMA_BASE_URL = "https://ollama.com"
+
+OLLAMA_PLANNER_MODELS = [
+    "nemotron-3-super",              # 122B — best for agentic reasoning tasks
+    "gpt-oss:120b",                  # 120B — strong instruction following
+    "qwen3-next:80b",               # 80B — fast fallback
+]
+
+OLLAMA_REASONER_MODELS = [
+    "deepseek-v3.1:671b",            # 671B — highest quality reasoning
+    "cogito-2.1:671b",              # 671B — deep reasoning
+    "nemotron-3-super",              # 122B — agentic fallback
+]
+
+OLLAMA_CODER_MODELS = [
+    "qwen3-coder:480b",              # 480B — strongest coder
+    "devstral-2:123b",              # 123B — strong code generation
+    "gpt-oss:120b",                  # 120B — general fallback
+]

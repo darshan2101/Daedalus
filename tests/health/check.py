@@ -82,7 +82,7 @@ def check_mongodb():
 
 def check_imports():
     modules = ["langgraph", "motor", "upstash_redis", "pymongo",
-               "yaml", "rich", "nest_asyncio", "aiohttp"]
+               "yaml", "rich", "nest_asyncio", "aiohttp", "ollama"]
     missing = []
     for m in modules:
         try:
@@ -126,6 +126,29 @@ def check_workspace():
     return f"outputs/workspace/ writable"
 
 
+def check_ollama():
+    """Verify Ollama API key is set and cloud is reachable."""
+    key = os.getenv("OLLAMA_API_KEY", "")
+    if not key:
+        # Not an error — Ollama is optional
+        return "OLLAMA_API_KEY not set -- Ollama cloud disabled (optional)"
+
+    # Quick connectivity test
+    import urllib.request
+    import json
+    req = urllib.request.Request(
+        "https://ollama.com/api/tags",
+        headers={"Authorization": f"Bearer {key}"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            data = json.loads(resp.read())
+            count = len(data.get("models", []))
+            return f"Ollama Cloud reachable -- {count} models available"
+    except Exception as e:
+        return f"WARN: Ollama Cloud unreachable: {e} (non-fatal)"
+
+
 def main():
     parser = argparse.ArgumentParser(description="Daedalus health check")
     parser.add_argument("--full", action="store_true", help="Also run mock planner check")
@@ -141,6 +164,7 @@ def main():
     check("outputs/workspace/",      check_workspace)
     check("Upstash Redis",           check_redis)
     check("MongoDB Atlas",           check_mongodb)
+    check("Ollama Cloud (optional)", check_ollama)
 
     passed = sum(1 for r in results if r[0] == PASS)
     failed = sum(1 for r in results if r[0] == FAIL)

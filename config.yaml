@@ -44,6 +44,11 @@ infra:
   mongodb_db:              "Daedalus"
   redis_ttl_hours:         48     # Auto-expire Redis keys after run
   checkpoint_every_agent:  true   # Write checkpoint after every agent completion
+  ollama_enabled:          true   # set false to disable even if key is present
+  ollama_timeout_seconds:  120    # large models can be slow on free tier
+  ollama_roles:                   # which roles get Ollama first-try
+    - planner
+    - reasoner
 
 logging:
   level:                   "INFO"

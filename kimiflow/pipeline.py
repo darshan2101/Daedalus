@@ -4,7 +4,7 @@
 
 from typing import TypedDict, Literal
 from langgraph.graph import StateGraph, END
-from agents import (
+from kimiflow.agents import (
     orchestrator_plan,
     coder_execute,
     reasoner_execute,

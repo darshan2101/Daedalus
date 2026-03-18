@@ -1,7 +1,8 @@
 import uuid
 from typing import Dict, Any
 
-from agents import _call_with_fallback, ORCHESTRATOR_MODELS, _parse_json
+from kimiflow.agents import _call_with_fallback, _parse_json
+from models import ORCHESTRATOR_MODELS
 from daedalus.state import RunState, AgentSpec
 
 PLANNER_SYSTEM_PROMPT = """

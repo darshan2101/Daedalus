@@ -43,9 +43,14 @@ def load_config():
 
 async def main_async():
     args = parse_args()
-    goal = " ".join(args.goal).strip() if args.goal else ""
-    if not goal:
-        goal = input("What do you want to build or solve?\n> ")
+    config = load_config()
+    
+    # Global overrides
+    if args.threshold is not None:
+        for k in config.get("thresholds", {}):
+            config["thresholds"][k] = args.threshold
+    if args.max_depth is not None:
+        config["runtime"]["max_recursion_depth"] = args.max_depth
 
     if args.quiet:
         import builtins
@@ -57,84 +62,104 @@ async def main_async():
             _real_print(*a, **kw)
         builtins.print = _quiet_print
 
-    config = load_config()
-    
-    if args.threshold is not None:
-        for k in config.get("thresholds", {}):
-            config["thresholds"][k] = args.threshold
-    if args.max_depth is not None:
-        config["runtime"]["max_recursion_depth"] = args.max_depth
-
-    # Connect DB
-    from infra.mongo_client import get_db
+    from infra.mongo_client import get_db, update_run_status
     db = get_db()
     
-    run_id = f"run_{uuid.uuid4().hex[:8]}"
+    run_state = None
+    run_id = None
     
-    now = datetime.datetime.utcnow().isoformat() + "Z"
-    await db.runs.insert_one({
-        "_id": run_id,
-        "goal": goal,
-        "preset": args.preset,
-        "status": "running",
-        "started_at": now,
-        "completed_at": None,
-        "final_score": None,
-        "system_iterations": 0,
-        "total_agents": 0,
-        "config_snapshot": config
-    })
-
-    console.print(Panel.fit(f"[bold cyan]DAEDALUS ORCHESTRATOR[/bold cyan]\n\n[bold]Goal:[/bold] {goal}", border_style="cyan"))
-
-    from daedalus.planner import plan_goal
-    
-    try:
-        plan_output = await plan_goal(goal, args.preset, config)
-        console.print(Panel(plan_output["plan"], title="[bold]Plan[/bold]"))
+    # ── 1. Resume or Start New ─────────────────────────────────────────────
+    if args.resume:
+        run_id = args.resume
+        run_state = await db.runs.find_one({"run_id": run_id})
+        if not run_state:
+            # Fallback to _id if legacy
+            run_state = await db.runs.find_one({"_id": run_id})
         
-        from rich.tree import Tree
-        tree = Tree(f"Daedalus Agent DAG ({run_id})")
-        
-        specs = {s["agent_id"]: s for s in plan_output["agent_specs"]}
-        # Calculate waves
-        in_degree = {s: 0 for s in specs}
-        for u, deps in plan_output.get("dep_graph", {}).items():
-            for d in deps:
-                in_degree[u] = in_degree.get(u, 0) + 1
-                
-        waves = []
-        queue = [s for s in specs if in_degree[s] == 0]
-        while queue:
-            waves.append(queue)
-            next_queue = []
-            for u in queue:
-                for v, deps in plan_output.get("dep_graph", {}).items():
-                    if u in deps:
-                        in_degree[v] -= 1
-                        if in_degree[v] == 0:
-                            next_queue.append(v)
-            queue = next_queue
+        if not run_state:
+            console.print(f"[bold red]Error: Run {run_id} not found.[/] Check MongoDB 'runs' collection.")
+            return
+        console.print(f"[bold blue]Resuming existing run: {run_id}[/]")
+    else:
+        goal = " ".join(args.goal).strip() if args.goal else ""
+        if not goal:
+            goal = input("What do you want to build or solve?\n> ")
             
-        for i, wave in enumerate(waves):
-            wave_node = tree.add(f"Wave {i}")
-            for a in wave:
-                wave_node.add(f"[bold]{a}[/bold] ({specs[a]['specialist']}) -> {specs[a]['task']}")
-                
-        console.print(tree)
+        console.print(Panel.fit(f"[bold cyan]DAEDALUS ORCHESTRATOR[/bold cyan]\n\n[bold]Goal:[/bold] {goal}", border_style="cyan"))
         
-        # update the db
-        await db.runs.update_one(
-            {"_id": run_id},
-            {"$set": {"total_agents": len(specs), "plan": plan_output["plan"]}}
-        )
+        # Phase 1: Planning
+        from daedalus.planner import plan_goal
+        try:
+            console.print(f"\n[bold yellow]Phase 1: Strategic Planning[/]")
+            plan_result = await plan_goal(goal, args.preset, config)
+            
+            run_id = f"run_{uuid.uuid4().hex[:8]}"
+            run_state = {
+                "run_id": run_id,
+                "goal": goal,
+                "preset": args.preset,
+                "plan": plan_result["plan"],
+                "agent_specs": plan_result["agent_specs"],
+                "dep_graph": plan_result["dep_graph"],
+                "output_type": plan_result.get("output_type", "code"),
+                "agent_results": {},
+                "frozen_agents": [],
+                "combined_result": "",
+                "combined_score": 0.0,
+                "broken_interfaces": [],
+                "system_iteration": 0,
+                "repair_attempts": 0,
+                "current_step": "coordinator",
+                "errors": []
+            }
+            
+            await update_run_status(run_id, "running", run_state)
+            
+            # Show the plan
+            console.print(Panel(run_state["plan"], title="[bold]Strategy[/bold]"))
+            _print_dag_tree(run_state)
+            
+        except Exception as e:
+            console.print(f"[bold red]Planning failed: {e}[/bold red]")
+            return
+
+    # ── 2. Execution (Week 3-4) ────────────────────────────────────────────
+    console.print(f"\n[bold yellow]Phase 2: Global Coordination & Execution[/]")
+    from daedalus.coordinator import GlobalCoordinator
+    try:
+        coordinator = GlobalCoordinator(run_state, config)
+        await coordinator.run()
+        
+        console.print(f"\n[bold green]✅ Daedalus Run {run_id} finished execution Phase.[/]")
+        console.print(f"Results saved to MongoDB and outputs/workspace/")
         
     except Exception as e:
-        console.print(f"[red]Error: {e}[/red]")
-        await db.runs.update_one({"_id": run_id}, {"$set": {"status": "failed"}})
+        console.print(f"[bold red]Coordination failed: {e}[/bold red]")
+        # Log to DB if run_id exists
+        if run_id:
+            await update_run_status(run_id, "failed", {"errors": [str(e)]})
+
+def _print_dag_tree(state: dict):
+    from rich.tree import Tree
+    from daedalus.coordinator import GlobalCoordinator
+    
+    tree = Tree(f"Daedalus Agent DAG ({state['run_id']})")
+    # Borrow logic from Coordinator to show waves in UI
+    coord = GlobalCoordinator(state, {})
+    waves = coord.get_execution_waves()
+    
+    for i, wave in enumerate(waves):
+        w_node = tree.add(f"Wave {i}")
+        for agent in wave:
+            w_node.add(f"[bold]{agent['agent_id']}[/bold] ({agent['specialist']}) -> {agent['task'][:60]}...")
+    console.print(tree)
 
 def main():
-    asyncio.run(main_async())
+    try:
+        asyncio.run(main_async())
+    except KeyboardInterrupt:
+        console.print("\n[bold red]Interrupted by user. Exiting...[/]")
+        sys.exit(0)
 
 if __name__ == "__main__":
     main()

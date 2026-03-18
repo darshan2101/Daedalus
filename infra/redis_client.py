@@ -40,12 +40,12 @@ def sem_get(run_id: str)  -> int:
 
 def freeze_agent(run_id: str, agent_id: str, ttl_hours: int = 48):
     key = f"run:{run_id}:modules"
-    get_redis().hset(key, {agent_id: "frozen"})
+    get_redis().hset(key, agent_id, "frozen")
     register_key(run_id, key, ttl_hours * 3600)
 
 def unfreeze_agent(run_id: str, agent_id: str, ttl_hours: int = 48):
     key = f"run:{run_id}:modules"
-    get_redis().hset(key, {agent_id: "active"})
+    get_redis().hset(key, agent_id, "active")
     register_key(run_id, key, ttl_hours * 3600)
 
 def is_frozen(run_id: str, agent_id: str) -> bool:

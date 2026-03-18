@@ -1,0 +1,51 @@
+# config.yaml — Daedalus global configuration
+# All values override-able via CLI flags
+
+runtime:
+  max_recursion_depth:     5      # Major → Sub → Sub-Sub max depth
+  max_parallel_major:      3      # asyncio.gather cap for major agents
+  max_parallel_sub:        3      # asyncio.gather cap per major agent
+  max_system_iterations:   3      # Global surgical-repair cycles
+  max_module_iterations:   5      # Per-module retry cycles (mirrors Daedalus)
+  plan_review:             false  # true = --plan-review CLI flag inserts human gate
+
+concurrency:
+  global_cap:              5      # Max simultaneous LLM calls system-wide
+  fallback_semaphore:      true   # Use asyncio.Semaphore if Redis unreachable
+
+thresholds:
+  code:                    0.88
+  docs:                    0.80
+  design:                  0.75
+  research:                0.82
+  default:                 0.82
+
+evaluation_weights:        # Must sum to 1.0 per preset
+  default:
+    correctness:           0.30
+    completeness:          0.20
+    consistency:           0.20
+    runnability:           0.20
+    format:                0.10
+  saas:
+    correctness:           0.28
+    completeness:          0.20
+    consistency:           0.20
+    runnability:           0.27   # higher — does the app actually run?
+    format:                0.05
+
+presets:
+  saas:
+    description: "Full-stack SaaS application"
+    must_pass:              ["routes_connect", "auth_wired", "frontend_calls_backend"]
+    default_major_agents:   5  # schema, backend, auth, frontend, docs
+
+infra:
+  mongodb_db:              "Daedalus"
+  redis_ttl_hours:         48     # Auto-expire Redis keys after run
+  checkpoint_every_agent:  true   # Write checkpoint after every agent completion
+
+logging:
+  level:                   "INFO"
+  show_model_attempts:     true   # false = --quiet equivalent
+  rich_tree:               true   # Show live agent tree in terminal

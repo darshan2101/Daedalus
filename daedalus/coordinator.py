@@ -91,8 +91,10 @@ class GlobalCoordinator:
                             console.print(f"  [dim grey]Skipping frozen agent: {agent['agent_id']} (Cached)[/]")
                             return
                         
-                        # Call the sub_agent bridge
-                        result = await run_agent_task(self.run_id, agent, self.config, self.state)
+                        # Call MajorAgent — it decides direct vs fragment
+                        from daedalus.major_agent import MajorAgent
+                        major = MajorAgent(agent, self.config, self.state)
+                        result = await major.run()
                         
                         if "agent_results" not in self.state:
                             self.state["agent_results"] = {}
@@ -108,6 +110,16 @@ class GlobalCoordinator:
                 console.print(f"[dim grey italic]  Wave {i} complete. Checkpoint saved.[/]\n")
 
             console.print("[bold green]✅ All waves finished execution.[/]")
+
+            # ── Merger: detect and resolve cross-agent interface conflicts ──
+            console.print("\n[bold yellow]🔍 Checking for interface conflicts...[/]")
+            from daedalus.merger import detect_and_resolve_all
+            broken, self.state["agent_results"] = await detect_and_resolve_all(
+                self.state.get("agent_results", {}),
+                self.state.get("dep_graph", {}),
+                self.run_id,
+            )
+            self.state["broken_interfaces"] = broken
             
             console.print("\n[bold magenta]📦 Aggregating outputs...[/]")
             from daedalus.aggregator import aggregate

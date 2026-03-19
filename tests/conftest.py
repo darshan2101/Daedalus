@@ -30,7 +30,15 @@ def mock_redis():
     redis.set.side_effect    = lambda k, v, ex=None: store.update({k: v})
     redis.incr.side_effect   = lambda k: counters.update({k: counters.get(k, 0) + 1}) or counters[k]
     redis.decr.side_effect   = lambda k: counters.update({k: max(0, counters.get(k, 0) - 1)}) or counters[k]
-    redis.hset.side_effect   = lambda k, mapping: hashes.update({k: {**hashes.get(k, {}), **mapping}})
+    def _hset_handler(k, *args, **kwargs):
+        """Handle both hset(key, mapping) and hset(key, field, value) forms."""
+        if len(args) == 1 and isinstance(args[0], dict):
+            hashes[k] = {**hashes.get(k, {}), **args[0]}
+        elif len(args) == 2:
+            hashes.setdefault(k, {})[args[0]] = args[1]
+        elif 'mapping' in kwargs:
+            hashes[k] = {**hashes.get(k, {}), **kwargs['mapping']}
+    redis.hset.side_effect   = _hset_handler
     redis.hget.side_effect   = lambda k, f: hashes.get(k, {}).get(f)
     redis.hgetall.side_effect = lambda k: hashes.get(k, {})
     redis.sadd.side_effect   = lambda k, *v: sets.update({k: sets.get(k, set()) | set(v)})

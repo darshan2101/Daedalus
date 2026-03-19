@@ -123,21 +123,75 @@ async def main_async():
             console.print(f"[bold red]Planning failed: {e}[/bold red]")
             return
 
-    # ── 2. Execution (Week 3-4) ────────────────────────────────────────────
-    console.print(f"\n[bold yellow]Phase 2: Global Coordination & Execution[/]")
-    from daedalus.coordinator import GlobalCoordinator
-    try:
-        coordinator = GlobalCoordinator(run_state, config)
-        await coordinator.run()
-        
-        console.print(f"\n[bold green]✅ Daedalus Run {run_id} finished execution Phase.[/]")
-        console.print(f"Results saved to MongoDB and outputs/workspace/")
-        
-    except Exception as e:
-        console.print(f"[bold red]Coordination failed: {e}[/bold red]")
-        # Log to DB if run_id exists
-        if run_id:
-            await update_run_status(run_id, "failed", {"errors": [str(e)]})
+    # ── 2. Execution: LangGraph or Inline Fallback ──────────────────────────
+    use_langgraph = config.get("runtime", {}).get("use_langgraph", True)
+    
+    if use_langgraph:
+        console.print(f"\n[bold yellow]Phase 2: LangGraph Orchestration[/]")
+        try:
+            if args.resume:
+                from daedalus.graph import build_resume_graph
+                graph = build_resume_graph(config)
+            else:
+                from daedalus.graph import build_daedalus_graph
+                graph = build_daedalus_graph(config)
+
+            # Build the graph input state
+            graph_state = {
+                "run_id": run_id,
+                "goal": run_state.get("goal", ""),
+                "preset": run_state.get("preset", "default"),
+                "config": config,
+                "plan": run_state.get("plan", ""),
+                "agent_specs": run_state.get("agent_specs", []),
+                "dep_graph": run_state.get("dep_graph", {}),
+                "output_type": run_state.get("output_type", "code"),
+                "agent_results": run_state.get("agent_results", {}),
+                "frozen_agents": run_state.get("frozen_agents", []),
+                "combined_result": "",
+                "combined_score": 0.0,
+                "system_score": 0.0,
+                "breakdown": "",
+                "weakest_agents": [],
+                "broken_interfaces": [],
+                "system_iteration": run_state.get("system_iteration", 0),
+                "repair_attempts": run_state.get("repair_attempts", 0),
+                "current_step": "plan" if not args.resume else "executing",
+                "errors": [],
+                "should_repair": False,
+                "done": False,
+            }
+
+            final_state = await graph.ainvoke(graph_state)
+            console.print(f"\n[bold green]✅ Daedalus Run {run_id} completed via LangGraph.[/]")
+            console.print(f"System score: {final_state.get('system_score', 0.0):.2f}")
+
+        except Exception as e:
+            console.print(f"[bold red]LangGraph execution failed: {e}[/bold red]")
+            console.print(f"[yellow]Falling back to inline coordinator...[/]")
+            # Auto-fallback to inline flow
+            from daedalus.coordinator import GlobalCoordinator
+            try:
+                coordinator = GlobalCoordinator(run_state, config)
+                await coordinator.run()
+                console.print(f"\n[bold green]✅ Run {run_id} completed (inline fallback).[/]")
+            except Exception as e2:
+                console.print(f"[bold red]Inline coordinator also failed: {e2}[/bold red]")
+                if run_id:
+                    await update_run_status(run_id, "failed", {"errors": [str(e), str(e2)]})
+    else:
+        # Inline fallback — proven flow
+        console.print(f"\n[bold yellow]Phase 2: Global Coordination & Execution (inline)[/]")
+        from daedalus.coordinator import GlobalCoordinator
+        try:
+            coordinator = GlobalCoordinator(run_state, config)
+            await coordinator.run()
+            console.print(f"\n[bold green]✅ Daedalus Run {run_id} finished execution.[/]")
+            console.print(f"Results saved to MongoDB and outputs/workspace/")
+        except Exception as e:
+            console.print(f"[bold red]Coordination failed: {e}[/bold red]")
+            if run_id:
+                await update_run_status(run_id, "failed", {"errors": [str(e)]})
 
 def _print_dag_tree(state: dict):
     from rich.tree import Tree

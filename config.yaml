@@ -6,6 +6,7 @@ runtime:
   max_parallel_major:      3      # asyncio.gather cap for major agents
   max_parallel_sub:        3      # asyncio.gather cap per major agent
   max_system_iterations:   3      # Global surgical-repair cycles
+  max_repair_attempts:     3      # Max times phase C repair loop triggers
   max_module_iterations:   5      # Per-module retry cycles (mirrors Daedalus)
   plan_review:             false  # true = --plan-review CLI flag inserts human gate
 
@@ -14,6 +15,7 @@ concurrency:
   fallback_semaphore:      true   # Use asyncio.Semaphore if Redis unreachable
 
 thresholds:
+  system:                  0.85   # Phase C: System Evaluation pass threshold
   code:                    0.88
   docs:                    0.80
   design:                  0.75

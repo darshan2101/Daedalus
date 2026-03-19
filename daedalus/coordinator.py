@@ -72,60 +72,64 @@ class GlobalCoordinator:
             console.print("[yellow]Empty plan, nothing to execute.[/]")
             return
 
-        console.print(f"\n[bold blue]Starting Execution Engine (Run: {self.run_id})[/]")
-        console.print(f"Total Waves: {len(waves)}\n")
-
-        for i, wave in enumerate(waves):
-            console.print(f"[bold cyan]🌊 Wave {i} ({len(wave)} agents)[/]")
-            
-            # Execute all agents in the wave (up to max_parallel cap)
-            # Parallelism is handled by asyncio.gather, but we also respect config caps
-            semaphore = asyncio.Semaphore(self.max_parallel)
-            
-            async def _run_with_sem(agent: AgentSpec):
-                async with semaphore:
-                    # Skip if already marked frozen (success from prior run)
-                    if is_frozen(self.run_id, agent["agent_id"]):
-                        console.print(f"  [dim grey]Skipping frozen agent: {agent['agent_id']} (Cached)[/]")
-                        return
-                    
-                    # Call the sub_agent bridge
-                    result = await run_agent_task(self.run_id, agent, self.config, self.state)
-                    
-                    # Update local state
-                    if "agent_results" not in self.state:
-                        self.state["agent_results"] = {}
-                    self.state["agent_results"][agent["agent_id"]] = result
-                    
-                    # If it passed its threshold, we mark it as frozen in Redis 
-                    # so a resume won't re-run it.
-                    if result.get("quality_score", 0.0) >= agent.get("threshold", 0.0):
-                        from infra.redis_client import freeze_agent
-                        freeze_agent(self.run_id, agent["agent_id"])
-
-            # Run the wave concurrently
-            await asyncio.gather(*[_run_with_sem(a) for a in wave])
-            
-            # Update MongoDB after each wave to ensure persistence
-            await update_run_status(self.run_id, "running", self.state)
-            console.print(f"[dim grey italic]  Wave {i} complete. Checkpoint saved.[/]\n")
-
-        console.print("[bold green]✅ All waves finished execution.[/]")
+        from daedalus.repair import repair_if_needed
         
-        console.print("\n[bold magenta]📦 Aggregating outputs...[/]")
-        from daedalus.aggregator import aggregate
-        self.state = aggregate(self.run_id, self.state, self.config)
-        
-        out_path = self.state.get("output_path", "unknown")
-        console.print(f"[bold green]✅ Aggregation complete. Output written to:[/] [white]{out_path}[/]")
+        while True:
+            console.print(f"\n[bold blue]Starting Execution Engine (Run: {self.run_id})[/]")
+            console.print(f"Total Waves: {len(waves)}\n")
 
-        self.state["current_step"] = "evaluator"
-        await update_run_status(self.run_id, "running", self.state)
+            for i, wave in enumerate(waves):
+                console.print(f"[bold cyan]🌊 Wave {i} ({len(wave)} agents)[/]")
+                
+                # Execute all agents in the wave (up to max_parallel cap)
+                semaphore = asyncio.Semaphore(self.max_parallel)
+                
+                async def _run_with_sem(agent: AgentSpec):
+                    async with semaphore:
+                        # Skip if already marked frozen (success from prior run)
+                        if is_frozen(self.run_id, agent["agent_id"]):
+                            console.print(f"  [dim grey]Skipping frozen agent: {agent['agent_id']} (Cached)[/]")
+                            return
+                        
+                        # Call the sub_agent bridge
+                        result = await run_agent_task(self.run_id, agent, self.config, self.state)
+                        
+                        if "agent_results" not in self.state:
+                            self.state["agent_results"] = {}
+                        self.state["agent_results"][agent["agent_id"]] = result
+                        
+                        if result.get("quality_score", 0.0) >= agent.get("threshold", 0.0):
+                            from infra.redis_client import freeze_agent
+                            freeze_agent(self.run_id, agent["agent_id"])
 
-        # Phase B: System Evaluator
-        from daedalus.evaluator import evaluate_run
-        self.state = evaluate_run(self.run_id, self.state, self.config)
+                await asyncio.gather(*[_run_with_sem(a) for a in wave])
+                
+                await update_run_status(self.run_id, "running", self.state)
+                console.print(f"[dim grey italic]  Wave {i} complete. Checkpoint saved.[/]\n")
 
-        # Mark done until Phase C (Repair) is implemented
+            console.print("[bold green]✅ All waves finished execution.[/]")
+            
+            console.print("\n[bold magenta]📦 Aggregating outputs...[/]")
+            from daedalus.aggregator import aggregate
+            self.state = aggregate(self.run_id, self.state, self.config)
+            
+            out_path = self.state.get("output_path", "unknown")
+            console.print(f"[bold green]✅ Aggregation complete. Output written to:[/] [white]{out_path}[/]")
+
+            self.state["current_step"] = "evaluator"
+            await update_run_status(self.run_id, "evaluating", self.state)
+
+            from daedalus.evaluator import evaluate_run
+            self.state = evaluate_run(self.run_id, self.state, self.config)
+
+            # Phase C: Repair Engine
+            needs_repair, self.state = repair_if_needed(self.run_id, self.state, self.config)
+            if not needs_repair:
+                break
+                
+            self.state["current_step"] = "repairing"
+            await update_run_status(self.run_id, "repairing", self.state)
+
+        # Mark done
         self.state["current_step"] = "done"
         await update_run_status(self.run_id, "done", self.state)

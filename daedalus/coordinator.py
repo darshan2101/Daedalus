@@ -121,3 +121,11 @@ class GlobalCoordinator:
 
         self.state["current_step"] = "evaluator"
         await update_run_status(self.run_id, "running", self.state)
+
+        # Phase B: System Evaluator
+        from daedalus.evaluator import evaluate_run
+        self.state = evaluate_run(self.run_id, self.state, self.config)
+
+        # Mark done until Phase C (Repair) is implemented
+        self.state["current_step"] = "done"
+        await update_run_status(self.run_id, "done", self.state)

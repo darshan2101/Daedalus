@@ -44,6 +44,9 @@ class RunState(TypedDict):
     combined_result:      str
     output_path:          str
     combined_score:       float
+    system_score:         float                  # Added in Phase B
+    breakdown:            str                    # Added in Phase B
+    weakest_agents:       list[str]              # Added in Phase B
     broken_interfaces:    list[BrokenInterface]
 
     # ── Iteration control

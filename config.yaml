@@ -10,6 +10,8 @@ runtime:
   max_module_iterations:   5      # Per-module retry cycles (mirrors Daedalus)
   plan_review:             false  # true = --plan-review CLI flag inserts human gate
   use_langgraph:           true   # true = formal LangGraph routing, false = inline coordinator fallback
+  allow_fragmentation:     true   # Set false to skip complexity check for speed
+  max_merger_conflicts:    5      # Speed: only resolve most critical conflicts
 
 concurrency:
   global_cap:              5      # Max simultaneous LLM calls system-wide

@@ -35,6 +35,7 @@ ENV/
 # ── Outputs / generated files ──────────────────────────────────────────────────
 outputs/
 workspace/
+md_file_reports/
 *.zip
 
 # ── IDE / editor ───────────────────────────────────────────────────────────────
@@ -61,3 +62,4 @@ htmlcov/
 
 # ── Local config overrides ─────────────────────────────────────────────────────
 config.local.yaml
+model_capabilities.yaml

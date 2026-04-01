@@ -7,9 +7,13 @@ import openai
 from models import (
     OPENROUTER_BASE, OPENROUTER_KEY,
     GROQ_BASE, GROQ_KEY, GROQ_MODEL,
+    CEREBRAS_BASE, CEREBRAS_KEY, CEREBRAS_MODEL,
+    SCALEWAY_BASE, SCALEWAY_KEY,
+    NVIDIA_BASE, NVIDIA_KEY,
     ORCHESTRATOR_MODELS, CODER_MODELS, REASONER_MODELS,
     DRAFTER_MODELS, CREATIVE_MODELS, FAST_MODELS, EVALUATOR_MODELS,
 )
+from daedalus.circuit_breaker import get_health_tracker
 
 # ── File format instruction injected into every coder prompt ─────────────────
 FILE_FORMAT_INSTRUCTION = """
@@ -57,12 +61,83 @@ def _call(base_url, api_key, model, system, user, temperature=0.7):
     return content.strip()
 
 
+_groq_disabled = False
+_cerebras_disabled = False
+_scaleway_disabled = False
+_nvidia_disabled = False
+
+# Provider registry: sentinel prefix → (base_url, api_key, default_model_or_None, disabled_flag_name)
+_PROVIDER_REGISTRY = {
+    "__groq__":     lambda: (GROQ_BASE,     GROQ_KEY,     GROQ_MODEL,     "_groq_disabled"),
+    "__cerebras__": lambda: (CEREBRAS_BASE, CEREBRAS_KEY, CEREBRAS_MODEL, "_cerebras_disabled"),
+    "__scaleway__": lambda: (SCALEWAY_BASE, SCALEWAY_KEY, None,           "_scaleway_disabled"),
+    "__nvidia__":   lambda: (NVIDIA_BASE,   NVIDIA_KEY,   None,           "_nvidia_disabled"),
+}
+
+# Strings that indicate a daily/permanent limit (session-kill)
+_DAILY_KILL_STRINGS = ("tokens per day", "TPD", "per day", "daily")
+
+def _is_daily_limit(err_str):
+    """Return True if the error string indicates a daily/permanent limit."""
+    lower = err_str.lower()
+    return any(s.lower() in lower for s in _DAILY_KILL_STRINGS)
+
+import kimiflow.agents as _self  # self-reference for setattr on provider flags
+
 def _call_with_fallback(model_list, system, user, temperature=0.7):
     """Tries each model in order until one works. Raises if all fail.
-    Uses exponential backoff: 429 → 2s/5s/10s, other errors → 0.5s/1s/2s.
+    Uses exponential backoff: 429 → 1s/2s/3s, other errors → 0.5s/1s/2s.
+    Supports direct provider routing via __provider__ and __provider__:model sentinels.
     """
+    global _groq_disabled, _cerebras_disabled, _scaleway_disabled, _nvidia_disabled
     last_err = None
     for model in model_list:
+        # ── Check if this is a provider sentinel ──
+        sentinel_prefix = None
+        for prefix in _PROVIDER_REGISTRY:
+            if model == prefix or (isinstance(model, str) and model.startswith(prefix + ":")):
+                sentinel_prefix = prefix
+                break
+
+        if sentinel_prefix is not None:
+            base_url, api_key, default_model, flag_name = _PROVIDER_REGISTRY[sentinel_prefix]()
+            # Check if provider is disabled for this session
+            if getattr(_self, flag_name, False):
+                continue
+            # Extract model name: __provider__:model or bare → default
+            if ":" in model:
+                target_model = model.split(":", 1)[1]
+            else:
+                if default_model is None:
+                    # Prefix-only provider with no bare form — skip
+                    print(f"  [skipping {model}: no default model for {sentinel_prefix}]")
+                    continue
+                target_model = default_model
+            provider_label = sentinel_prefix.strip("_")
+            try:
+                print(f"  [trying: {provider_label}/{target_model}]")
+                result = _call(base_url, api_key, target_model, system, user, temperature)
+                print(f"  [success: {provider_label}/{target_model}]")
+                return result
+            except openai.RateLimitError as e:
+                err_str = str(e)
+                if _is_daily_limit(err_str):
+                    print(f"  [{provider_label} daily limit on {target_model} — disabling for session]")
+                    setattr(_self, flag_name, True)
+                else:
+                    print(f"  [{provider_label} 429 on {target_model} — skipping]")
+                last_err = f"{provider_label} rate limit: {e}"
+                continue
+            except Exception as e:
+                err_str = str(e)
+                if _is_daily_limit(err_str):
+                    print(f"  [{provider_label} daily limit on {target_model} — disabling for session]")
+                    setattr(_self, flag_name, True)
+                else:
+                    print(f"  [{provider_label} failed: {e}]")
+                last_err = f"{provider_label} fail: {e}"
+                continue
+
         for attempt in range(3):  # up to 3 attempts per model before giving up
             try:
                 print(f"  [trying: {model}]")
@@ -75,10 +150,14 @@ def _call_with_fallback(model_list, system, user, temperature=0.7):
                 last_err = f"404 on {model}"
                 break  # 404 is permanent for this model — no retry
             except openai.RateLimitError:
-                wait = [2, 5, 10][attempt]
-                print(f"  [429 — attempt {attempt+1}/3, waiting {wait}s: {model}]")
-                last_err = f"429 on {model}"
-                time.sleep(wait)
+                if attempt == 0:
+                    # First 429 — skip all retries for this model, move to next
+                    print(f"  [429 — skipping {model} (rate limited)]")
+                    last_err = f"429 on {model}"
+                    break  # Move to next model immediately
+                wait = [0, 1, 2][attempt]
+                if wait > 0:
+                    time.sleep(wait)
             except ValueError as e:
                 # None content — no point retrying same model
                 print(f"  [null response — skipping: {model}]")
@@ -121,11 +200,48 @@ def _parse_json(raw):
         }
 
 
+def _call_with_circuit_breaker(model_list, system, user, temperature=0.7):
+    """
+    Wrapper that skips models in circuit_open state.
+    Calls _call_with_fallback for available models.
+    Records success/error to health tracker.
+    """
+    tracker = get_health_tracker()
+    
+    for model in model_list:
+        if not tracker.can_use_model(model):
+            continue
+        
+        try:
+            result = _call_with_fallback([model], system, user, temperature)
+            tracker.record_success(model)
+            return result
+        except Exception as e:
+            tracker.record_error(model, str(e))
+            continue
+    
+    raise RuntimeError(f"All models failed.")
+
+
 # ── ORCHESTRATOR — Hermes 405B first ─────────────────────────────────────────
 def orchestrator_plan(task: str) -> dict:
     """
-    Analyses the task and returns:
-      {"plan": str, "assigned_model": "coder|reasoner|drafter|creative|fast"}
+    ORCHESTRATOR ROLE — Decompose goal into modules
+    
+    CHECKLIST (verify each):
+    ☐ Module list is complete (no pieces missing from original goal)
+    ☐ Each module has ONE primary responsibility (no compound modules)
+    ☐ Dependencies are explicit (module B depends on module A's interface)
+    ☐ Success criteria are measurable (not "good" but "TestX passes")
+    ☐ Module sequence respects dependencies (can't test user-service without auth gateway first)
+    ☐ Assumptions are documented (we assume PostgreSQL, not choose it)
+    
+    OUTPUT FORMAT (JSON):
+    {
+      "modules": [...],
+      "execution_sequence": [...],
+      "assumptions": "..."
+    }
     """
     system = (
         "You are the orchestrator of a 5-specialist AI pipeline.\n"
@@ -138,13 +254,34 @@ def orchestrator_plan(task: str) -> dict:
         "Output ONLY valid JSON, no markdown:\n"
         '{"plan": "<one sentence plan>", "assigned_model": "<specialist>"}'
     )
-    raw = _call_with_fallback(ORCHESTRATOR_MODELS, system, task, temperature=0.2)
+    raw = _call_with_circuit_breaker(ORCHESTRATOR_MODELS, system, task, temperature=0.2)
     return _parse_json(raw)
 
 
 # ── CODER — Qwen3-Coder 480B first ───────────────────────────────────────────
 def coder_execute(plan: str, task: str, feedback: str = "") -> str:
-    """Qwen3-Coder 480B → GPT-OSS 120B → GLM → Nemotron → Mistral → auto"""
+    """
+    CODER ROLE — Build production-ready code modules
+    
+    CHECKLIST (verify each):
+    ☐ All test cases from spec are implemented (no skipped tests)
+    ☐ All tests pass (0 failures, 0 errors)
+    ☐ Error handling is explicit (not hidden in defer/panic)
+    ☐ Code follows language conventions (Go: godoc, no globals, error wrapping)
+    ☐ No hardcoded values (use config, flags, or parameters)
+    ☐ Test coverage is >80% (most functions have unit tests)
+    
+    OUTPUT FORMAT (JSON):
+    {
+      "module": "auth-gateway",
+      "status": "complete|partial|failed",
+      "test_results": {"total": 4, "passed": 4, "coverage": 87},
+      "checklist": {...},
+      "files": [...],
+      "blockers": [],
+      "next_module": "user-service"
+    }
+    """
     feedback_block = (
         f"\nPREVIOUS ATTEMPT FEEDBACK (address all points below):\n{feedback}\n"
         if feedback else ""
@@ -157,12 +294,32 @@ def coder_execute(plan: str, task: str, feedback: str = "") -> str:
         f"{feedback_block}"
         f"\n{FILE_FORMAT_INSTRUCTION}"
     )
-    return _call_with_fallback(CODER_MODELS, system, task)
+    return _call_with_circuit_breaker(CODER_MODELS, system, task)
 
 
 # ── REASONER — Hermes 405B first ─────────────────────────────────────────────
 def reasoner_execute(plan: str, task: str, feedback: str = "") -> str:
-    """Hermes 405B → Nemotron 120B → MiniMax → Qwen3-Next 80B → StepFun → Llama 70B → auto"""
+    """
+    REASONER ROLE — Validate integration and system design
+    
+    CHECKLIST (verify each):
+    ☐ Data flows are correct (input/output types match across modules)
+    ☐ Error handling is consistent (all errors wrapped, context preserved)
+    ☐ No circular dependencies (module A doesn't call B which calls A)
+    ☐ Performance is reasonable (no obvious N+1, no blocking operations)
+    ☐ Security contracts are sound (auth is enforced, secrets not logged)
+    ☐ Integration assumptions are documented (what fails if PostgreSQL down?)
+    
+    OUTPUT FORMAT (JSON):
+    {
+      "modules_reviewed": ["auth-gateway", "user-service"],
+      "integration_status": "complete|partial|failed",
+      "data_flows": [...],
+      "checklist": {...},
+      "risks": [...],
+      "next_step": "..."
+    }
+    """
     feedback_block = (
         f"\nPREVIOUS ATTEMPT FEEDBACK (address all points below):\n{feedback}\n"
         if feedback else ""
@@ -174,12 +331,32 @@ def reasoner_execute(plan: str, task: str, feedback: str = "") -> str:
         f"Plan: {plan}"
         f"{feedback_block}"
     )
-    return _call_with_fallback(REASONER_MODELS, system, task)
+    return _call_with_circuit_breaker(REASONER_MODELS, system, task)
 
 
 # ── DRAFTER — Llama 3.3 70B first ────────────────────────────────────────────
 def drafter_execute(plan: str, task: str, feedback: str = "") -> str:
-    """Llama 70B → Mistral Small → Gemma 27B → GPT-OSS 20B → auto"""
+    """
+    DRAFTER ROLE — Write unit tests and integration tests
+    
+    CHECKLIST (verify each):
+    ☐ Unit tests cover all public functions (no function is untested)
+    ☐ Each test is independent (no shared state between tests)
+    ☐ Edge cases are covered (empty input, null, boundary values)
+    ☐ Error cases are tested (what happens when dependency fails?)
+    ☐ README explains module purpose and usage
+    ☐ Examples are runnable (copy-paste should work)
+    
+    OUTPUT FORMAT (JSON):
+    {
+      "module": "...",
+      "test_status": "complete|partial|failed",
+      "unit_tests": {...},
+      "integration_tests": {...},
+      "checklist": {...},
+      "files": [...]
+    }
+    """
     feedback_block = (
         f"\nPREVIOUS ATTEMPT FEEDBACK (address all points below):\n{feedback}\n"
         if feedback else ""
@@ -190,12 +367,32 @@ def drafter_execute(plan: str, task: str, feedback: str = "") -> str:
         f"Plan: {plan}"
         f"{feedback_block}"
     )
-    return _call_with_fallback(DRAFTER_MODELS, system, task)
+    return _call_with_circuit_breaker(DRAFTER_MODELS, system, task)
 
 
 # ── CREATIVE — Dolphin Mistral first ─────────────────────────────────────────
 def creative_execute(plan: str, task: str, feedback: str = "") -> str:
-    """Dolphin Mistral 24B → Arcee Trinity → Gemma 27B → MiniMax → auto"""
+    """
+    CREATIVE ROLE — Test resilience and edge cases (Chaos engineer)
+    
+    CHECKLIST (verify each):
+    ☐ Database unavailable → module fails gracefully (returns error, not crash)
+    ☐ Network timeout → module returns timeout error (not hang forever)
+    ☐ Empty/null input → module returns validation error (not crash)
+    ☐ Missing secret → module fails at startup (not at runtime)
+    ☐ Dependency slow → module has timeout (not freezes)
+    ☐ All failures logged with context (not silent failures)
+    
+    OUTPUT FORMAT (JSON):
+    {
+      "module": "...",
+      "chaos_tests": [...],
+      "resilience_score": 0.75,
+      "critical_issues": 1,
+      "high_issues": 2,
+      "next_step": "..."
+    }
+    """
     feedback_block = (
         f"\nPREVIOUS ATTEMPT FEEDBACK (address all points below):\n{feedback}\n"
         if feedback else ""
@@ -206,12 +403,32 @@ def creative_execute(plan: str, task: str, feedback: str = "") -> str:
         f"Plan: {plan}"
         f"{feedback_block}"
     )
-    return _call_with_fallback(CREATIVE_MODELS, system, task)
+    return _call_with_circuit_breaker(CREATIVE_MODELS, system, task)
 
 
 # ── FAST — Nemotron Nano 30B first ───────────────────────────────────────────
 def fast_execute(plan: str, task: str, feedback: str = "") -> str:
-    """Nemotron Nano 30B → Gemma 12B → Nemotron 12B → ... → 1.2B → auto"""
+    """
+    FAST ROLE — Quick health check
+    
+    CHECKLIST (verify each):
+    ☐ Code compiles without errors
+    ☐ Tests run (pass or fail, but run)
+    ☐ README exists (even if incomplete)
+    ☐ No obvious crashes (null pointers, panics caught)
+    ☐ Correct language (Go code is in Go, not Python)
+    ☐ Purpose is clear (README explains what it does)
+    
+    OUTPUT FORMAT (JSON):
+    {
+      "module": "...",
+      "health_status": "healthy|degraded|failing",
+      "checklist": {...},
+      "quick_issues": [],
+      "ready_for_review": true,
+      "estimated_review_time": "..."
+    }
+    """
     feedback_block = (
         f"\nPREVIOUS ATTEMPT FEEDBACK (address all points below):\n{feedback}\n"
         if feedback else ""
@@ -221,7 +438,7 @@ def fast_execute(plan: str, task: str, feedback: str = "") -> str:
         f"Plan: {plan}"
         f"{feedback_block}"
     )
-    return _call_with_fallback(FAST_MODELS, system, task)
+    return _call_with_circuit_breaker(FAST_MODELS, system, task)
 
 
 # ── GROQ BACKUP — always-on (Groq has no free cap issues) ────────────────────
@@ -237,18 +454,41 @@ def groq_draft(plan: str, task: str, feedback: str = "") -> str:
         f"{feedback_block}"
         f"\n{FILE_FORMAT_INSTRUCTION}"
     )
-    return _call(GROQ_BASE, GROQ_KEY, GROQ_MODEL, system, task)
+    return _call_with_circuit_breaker(["__groq__"], system, task)
 
 
 # ── EVALUATOR — Hermes 405B first ────────────────────────────────────────────
 def evaluator_score(task: str, result: str) -> dict:
     """
-    Returns:
-      {"score": float 0-1, "feedback": str, "retry_with": "coder|reasoner|drafter|creative|fast|done"}
+    EVALUATOR ROLE — Score components
+    
+    CHECKLIST (verify each):
+    ☐ All tests pass (0 failures, 0 errors)
+    ☐ Code follows language conventions (godoc, no globals, etc.)
+    ☐ Error handling is explicit (not hidden)
+    ☐ No hardcoded values (all parameterized)
+    ☐ Documentation is complete (README, examples, gotchas)
+    ☐ Coverage >80% (most functions tested)
+    
+    OUTPUT FORMAT (JSON):
+    {
+      "module": "...",
+      "implementation_score": 0.95,
+      "test_score": 1.0,
+      "overall_score": 0.95,
+      "checklist": {...},
+      "feedback": [...],
+      "blockers": [],
+      "ready_for_integration": true,
+      "next_step": "..."
+    }
     """
     system = (
         "You are a strict quality evaluator.\n"
         "Score the result 0.0 to 1.0 based on how well it completes the task.\n"
+        "CRITICAL: If the task specifies a language or framework (e.g., Rust, Elixir, "
+        "Go), the result MUST use that language. Switching languages is an automatic "
+        "score of 0.0 regardless of functional correctness.\n"
         "0.85+ means done. Below that, pick the best specialist to retry:\n"
         "  coder / reasoner / drafter / creative / fast\n"
         "IMPORTANT: If the task requires generating files/code, the result MUST contain\n"
@@ -256,7 +496,7 @@ def evaluator_score(task: str, result: str) -> dict:
         "Output ONLY valid JSON, no markdown:\n"
         '{"score": 0.0, "feedback": "<why>", "retry_with": "<specialist|done>"}'
     )
-    raw = _call_with_fallback(
+    raw = _call_with_circuit_breaker(
         EVALUATOR_MODELS,
         system,
         f"Task:\n{task}\n\nResult:\n{result}",

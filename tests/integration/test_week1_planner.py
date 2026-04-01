@@ -15,11 +15,12 @@ class TestWeek1PlannerGate:
     ):
         """Planner returns a dict with plan, agent_specs, dep_graph."""
         mock_response = json.dumps(mock_llm_planner_response)
-        with patch("agents._call_with_fallback", return_value=mock_response):
+        with patch("daedalus.planner._call_with_fallback", return_value=mock_response):
             with patch("infra.mongo_client.get_db", return_value=mock_db):
                 from daedalus.planner import plan_goal
                 config = {"thresholds": {"code": 0.88, "docs": 0.80, "default": 0.82},
-                          "runtime": {"max_recursion_depth": 5}}
+                          "runtime": {"max_recursion_depth": 5},
+                          "infra": {"ollama_enabled": False}}
                 result = await plan_goal("Build a SaaS app", "saas", config)
 
         assert "plan" in result
@@ -33,11 +34,12 @@ class TestWeek1PlannerGate:
         self, mock_db, mock_redis, mock_llm_planner_response
     ):
         mock_response = json.dumps(mock_llm_planner_response)
-        with patch("agents._call_with_fallback", return_value=mock_response):
+        with patch("daedalus.planner._call_with_fallback", return_value=mock_response):
             with patch("infra.mongo_client.get_db", return_value=mock_db):
                 from daedalus.planner import plan_goal, _validate_dag
                 config = {"thresholds": {"code": 0.88, "docs": 0.80, "default": 0.82},
-                          "runtime": {"max_recursion_depth": 5}}
+                          "runtime": {"max_recursion_depth": 5},
+                          "infra": {"ollama_enabled": False}}
                 result = await plan_goal("Build a SaaS app", "saas", config)
                 # Should not raise
                 _validate_dag(result["agent_specs"], result["dep_graph"])
@@ -47,11 +49,12 @@ class TestWeek1PlannerGate:
         self, mock_db, mock_redis, mock_llm_planner_response
     ):
         mock_response = json.dumps(mock_llm_planner_response)
-        with patch("agents._call_with_fallback", return_value=mock_response):
+        with patch("daedalus.planner._call_with_fallback", return_value=mock_response):
             with patch("infra.mongo_client.get_db", return_value=mock_db):
                 from daedalus.planner import plan_goal
                 config = {"thresholds": {"code": 0.88, "docs": 0.80, "default": 0.82},
-                          "runtime": {"max_recursion_depth": 5}}
+                          "runtime": {"max_recursion_depth": 5},
+                          "infra": {"ollama_enabled": False}}
                 result = await plan_goal("Build a SaaS app", "saas", config)
 
         agent_ids = {s["agent_id"] for s in result["agent_specs"]}
@@ -63,7 +66,7 @@ class TestWeek1PlannerGate:
         """Verify Upstash Redis REST URL is set and responding."""
         import os
         from dotenv import load_dotenv
-        load_dotenv()
+        load_dotenv(override=True)
         assert os.getenv("UPSTASH_REDIS_REST_URL"), "UPSTASH_REDIS_REST_URL missing from .env"
         assert os.getenv("UPSTASH_REDIS_REST_TOKEN"), "UPSTASH_REDIS_REST_TOKEN missing from .env"
 
@@ -71,7 +74,7 @@ class TestWeek1PlannerGate:
         """Verify MongoDB URI is set."""
         import os
         from dotenv import load_dotenv
-        load_dotenv()
+        load_dotenv(override=True)
         assert os.getenv("MONGODB_URI"), "MONGODB_URI missing from .env"
         assert os.getenv("MONGODB_DB"), "MONGODB_DB missing from .env"
 

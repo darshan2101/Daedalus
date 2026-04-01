@@ -90,7 +90,11 @@ class MajorAgent:
         depth = self.spec.get("depth", 0)
 
         # Quick heuristic: very short tasks are never fragmented
-        if len(task) < 200:
+        if len(task) < 800:
+            return False, []
+        
+        # Check config to allow disabling fragmentation entirely for speed
+        if not self.config.get("runtime", {}).get("allow_fragmentation", True):
             return False, []
 
         try:

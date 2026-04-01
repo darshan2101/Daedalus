@@ -18,7 +18,7 @@ import uuid
 import yaml
 import argparse
 from dotenv import load_dotenv
-load_dotenv()
+load_dotenv(override=True)
 
 from rich.console import Console
 from rich.panel import Panel
@@ -79,7 +79,36 @@ async def main_async():
         if not run_state:
             console.print(f"[bold red]Error: Run {run_id} not found.[/] Check MongoDB 'runs' collection.")
             return
+
+        # Fix 3: Restore agent_results from checkpoints collection during resume
+        from infra.mongo_client import get_checkpoints
+        from infra.redis_client import freeze_agent
+        checkpoints = await get_checkpoints(run_id)
+        restored_results = {}
+        for cp in checkpoints:
+            aid = cp.get("agent_id")
+            if aid:
+                status = cp.get("status", "done")
+                restored_results[aid] = {
+                    "agent_id": aid,
+                    "task": cp.get("task", ""),
+                    "result": cp.get("result", ""),
+                    "quality_score": cp.get("score", cp.get("quality_score", 0.0)),
+                    "iterations": cp.get("iterations", 1),
+                    "status": status,
+                    "error": cp.get("error"),
+                }
+                if status == "done":
+                    freeze_agent(run_id, aid)
+        run_state["agent_results"] = restored_results
+        
+        # C1: Fresh budget for this resume session
+        run_state["repair_attempts"] = 0
+        run_state["system_iteration"] = 0
+        
         console.print(f"[bold blue]Resuming existing run: {run_id}[/]")
+        if restored_results:
+             console.print(f"  [dim]Restored {len(restored_results)} agent results from checkpoints.[/]")
     else:
         goal = " ".join(args.goal).strip() if args.goal else ""
         if not goal:
@@ -150,12 +179,14 @@ async def main_async():
                 "frozen_agents": run_state.get("frozen_agents", []),
                 "combined_result": "",
                 "combined_score": 0.0,
-                "system_score": 0.0,
-                "breakdown": "",
+                # N3 Fix: preserve existing score on resume; use -1.0 sentinel for fresh runs
+                "system_score": run_state.get("system_score", -1.0) if args.resume else -1.0,
+                "breakdown": run_state.get("breakdown", "") if args.resume else "",
                 "weakest_agents": [],
                 "broken_interfaces": [],
                 "system_iteration": run_state.get("system_iteration", 0),
                 "repair_attempts": run_state.get("repair_attempts", 0),
+                "any_agent_ran": True,
                 "current_step": "plan" if not args.resume else "executing",
                 "errors": [],
                 "should_repair": False,
@@ -163,18 +194,60 @@ async def main_async():
             }
 
             final_state = await graph.ainvoke(graph_state)
+            from infra.mongo_client import update_run_status
+            await update_run_status(run_id, "done", final_state)
+            
+            from daedalus.assembler import parse_and_zip
+            zip_path = parse_and_zip(run_id, final_state)
+            
             console.print(f"\n[bold green]✅ Daedalus Run {run_id} completed via LangGraph.[/]")
-            console.print(f"System score: {final_state.get('system_score', 0.0):.2f}")
+            raw_score = final_state.get('system_score', -1.0)
+            score = raw_score if raw_score >= 0 else 0.0  # N3 Fix: don't clamp preserved sentinel
+            console.print(f"System score: {score:.2f}")
+            console.print(f"Build Package: {zip_path}")
 
         except Exception as e:
             console.print(f"[bold red]LangGraph execution failed: {e}[/bold red]")
             console.print(f"[yellow]Falling back to inline coordinator...[/]")
+            
+            # Fix 2: Reload run_state from MongoDB before fallback to have latest results/iterations
+            try:
+                saved = await db.runs.find_one({"_id": run_id})
+                if saved:
+                    # Update run_state with latest data from DB
+                    for k in ("agent_results", "frozen_agents", "system_iteration", "repair_attempts"):
+                        if k in saved:
+                            run_state[k] = saved[k]
+                
+                # Also reload agent_results from checkpoints to be 100% sure
+                from infra.mongo_client import get_checkpoints
+                checkpoints = await get_checkpoints(run_id)
+                for cp in checkpoints:
+                    aid = cp.get("agent_id")
+                    if aid:
+                        run_state["agent_results"][aid] = {
+                            "agent_id": aid,
+                            "task": cp.get("task", ""),
+                            "result": cp.get("result", ""),
+                            "quality_score": cp.get("score", cp.get("quality_score", 0.0)),
+                            "iterations": cp.get("iterations", 1),
+                            "status": cp.get("status", "done"),
+                            "error": cp.get("error"),
+                        }
+            except Exception as reload_err:
+                console.print(f"[dim red]Warning: Failed to reload state before fallback: {reload_err}[/]")
+
             # Auto-fallback to inline flow
             from daedalus.coordinator import GlobalCoordinator
             try:
                 coordinator = GlobalCoordinator(run_state, config)
                 await coordinator.run()
+                
+                from daedalus.assembler import parse_and_zip
+                zip_path = parse_and_zip(run_id, run_state)
+                
                 console.print(f"\n[bold green]✅ Run {run_id} completed (inline fallback).[/]")
+                console.print(f"Build Package: {zip_path}")
             except Exception as e2:
                 console.print(f"[bold red]Inline coordinator also failed: {e2}[/bold red]")
                 if run_id:

@@ -14,6 +14,44 @@ from infra.mongo_client import get_db
 
 console = Console()
 
+def _sanitize_json_escapes(raw: str) -> str:
+    r"""
+    Airtight logic to escape invalid backslashes in JSON strings.
+    Valid escapes: \", \\, \/, \b, \f, \n, \r, \t, and \uXXXX.
+    Any other backslash (e.g. in code or file paths) is double-escaped.
+    """
+    import re
+    valid_escapes = {'"', '\\', '/', 'b', 'f', 'n', 'r', 't'}
+    result = []
+    i = 0
+    while i < len(raw):
+        if raw[i] == '\\':
+            if i + 1 < len(raw):
+                next_char = raw[i+1]
+                if next_char in valid_escapes:
+                    result.append('\\')
+                    result.append(next_char)
+                    i += 2
+                elif next_char == 'u':
+                    if i + 5 < len(raw) and all(c in '0123456789abcdefABCDEF' for c in raw[i+2:i+6]):
+                        result.append('\\')
+                        result.append('u')
+                        result.extend(raw[i+2:i+6])
+                        i += 6
+                    else:
+                        result.append('\\\\')
+                        i += 1
+                else:
+                    result.append('\\\\')
+                    i += 1
+            else:
+                result.append('\\\\')
+                i += 1
+        else:
+            result.append(raw[i])
+            i += 1
+    return "".join(result)
+
 # ── LLM Prompt Templates ─────────────────────────────────────────────────────
 
 DETECT_CONFLICTS_PROMPT = """You are Daedalus Conflict Detector. Given the outputs of multiple agents that worked on related parts of a project, identify any INTERFACE CONFLICTS between them.
@@ -82,6 +120,7 @@ async def _call_llm(system_prompt: str, user_msg: str) -> str:
 async def detect_conflicts(
     agent_results: Dict[str, StepResult],
     dep_graph: Dict[str, List[str]],
+    resolved_pairs: set = None,
 ) -> List[BrokenInterface]:
     """
     Inspect all agent outputs and identify interface conflicts.
@@ -93,7 +132,11 @@ async def detect_conflicts(
     # Build a summary of each agent's output for the LLM
     agent_outputs = ""
     for aid, result in agent_results.items():
-        output_text = result.get("result", "")[:2000]
+        output_text = result.get("result", "")
+        if len(output_text) > 3000:
+            head = output_text[:1500]
+            tail = output_text[-1500:]
+            output_text = head + "\n... [truncated] ...\n" + tail
         agent_outputs += f"\n--- Agent {aid} ---\n{output_text}\n"
 
     user_msg = DETECT_CONFLICTS_PROMPT.format(
@@ -107,13 +150,34 @@ async def detect_conflicts(
         if raw.startswith("```"):
             raw = raw.split("\n", 1)[1].rsplit("```", 1)[0].strip()
 
-        conflicts = json.loads(raw)
+        # Extract just the JSON array — find first [ and last ]
+        start = raw.find("[")
+        end = raw.rfind("]") + 1
+        if start != -1 and end > 0:
+            raw = raw[start:end]
+
+        try:
+            conflicts = json.loads(raw)
+        except json.JSONDecodeError:
+            # Last resort: try to extract individual conflict objects
+            import re
+            objects = re.findall(r'\{[^{}]+\}', raw, re.DOTALL)
+            conflicts = []
+            for obj in objects:
+                try:
+                    conflicts.append(json.loads(obj))
+                except Exception:
+                    continue
+
         if not isinstance(conflicts, list):
             return []
 
         broken: List[BrokenInterface] = []
         for c in conflicts:
             if "agent_a" in c and "agent_b" in c and "description" in c:
+                if resolved_pairs and frozenset([c["agent_a"], c["agent_b"]]) in resolved_pairs:
+                    console.print(f"  [dim]Skipping already-resolved conflict: {c['agent_a']} ↔ {c['agent_b']}[/]")
+                    continue
                 broken.append({
                     "agent_a": c["agent_a"],
                     "agent_b": c["agent_b"],
@@ -140,6 +204,7 @@ async def resolve_conflict(
     result_a: str,
     result_b: str,
     run_id: str,
+    system_iteration: int = 0,
 ) -> Dict[str, Any]:
     """
     Resolve one specific conflict pair via LLM.
@@ -150,8 +215,8 @@ async def resolve_conflict(
         description=interface["description"],
         agent_a=interface["agent_a"],
         agent_b=interface["agent_b"],
-        result_a=result_a[:3000],
-        result_b=result_b[:3000],
+        result_a=result_a[:4000],
+        result_b=result_b[:4000],
     )
 
     try:
@@ -160,6 +225,15 @@ async def resolve_conflict(
         if raw.startswith("```"):
             raw = raw.split("\n", 1)[1].rsplit("```", 1)[0].strip()
 
+        # Extract just the JSON object — find first { and last }
+        start = raw.find("{")
+        end = raw.rfind("}") + 1
+        if start != -1 and end > 0:
+            raw = raw[start:end]
+
+        # Bug Fix N2: Sanitize invalid escape sequences (e.g., unescaped backslashes in code)
+        raw = _sanitize_json_escapes(raw)
+
         resolution = json.loads(raw)
 
         # Log to MongoDB
@@ -167,6 +241,7 @@ async def resolve_conflict(
         db = get_db()
         await db.conflicts.insert_one({
             "run_id": run_id,
+            "system_iteration": system_iteration,
             "agent_a": interface["agent_a"],
             "agent_b": interface["agent_b"],
             "interface": interface["description"],
@@ -190,33 +265,91 @@ async def detect_and_resolve_all(
     agent_results: Dict[str, StepResult],
     dep_graph: Dict[str, List[str]],
     run_id: str,
+    system_iteration: int = 0,
+    config: dict = None,
 ) -> tuple[List[BrokenInterface], Dict[str, StepResult]]:
     """
-    Convenience function: detect all conflicts, resolve each, patch agent_results.
+    Convenience function: detect all conflicts, resolve each in parallel, patch agent_results.
     Returns (broken_interfaces, updated_agent_results).
     """
-    broken = await detect_conflicts(agent_results, dep_graph)
+    # Fetch prior resolved conflicts for this run_id
+    db = get_db()
+    cursor = db.conflicts.find({"run_id": run_id})
+    prior_conflicts = await cursor.to_list(None)
+    resolved_pairs = {frozenset([doc["agent_a"], doc["agent_b"]]) for doc in prior_conflicts}
+
+    broken = await detect_conflicts(agent_results, dep_graph, resolved_pairs=resolved_pairs)
     if not broken:
         return [], agent_results
 
+    # Cap conflicts for speed
+    if config:
+        config_max = config.get("runtime", {}).get("max_merger_conflicts", 3)
+        agent_count = len(agent_results)
+        # min(agent_count - 1, config_max) ensures scaling but respects the global cap
+        max_conflicts = min(max(1, agent_count - 1), config_max)
+        
+        if len(broken) > max_conflicts:
+            console.print(f"  [dim]Capping conflicts to resolve at {max_conflicts} (dynamic scaling)[/]")
+            broken = broken[:max_conflicts]
+
     updated_results = dict(agent_results)
 
+    # Prepare parallel resolution tasks
+    tasks = []
     for conflict in broken:
         a_id = conflict["agent_a"]
         b_id = conflict["agent_b"]
         result_a = agent_results.get(a_id, {}).get("result", "")
         result_b = agent_results.get(b_id, {}).get("result", "")
+        tasks.append(resolve_conflict(conflict, result_a, result_b, run_id, system_iteration))
 
-        resolution = await resolve_conflict(conflict, result_a, result_b, run_id)
+    # Run in parallel
+    resolutions = await asyncio.gather(*tasks, return_exceptions=True)
 
+    canonical_registry = {}  # agent_id -> "canonical" or "non-canonical"
+
+    for i, resolution in enumerate(resolutions):
+        if isinstance(resolution, Exception):
+            console.print(f"  [red]✖ Conflict resolution {i} failed: {resolution}[/red]")
+            continue
+            
         patched = resolution.get("patched_output", "")
         canonical = resolution.get("canonical_agent", "")
+        
         if patched and canonical:
-            loser_id = b_id if canonical == a_id else a_id
-            if loser_id in updated_results:
-                updated_results[loser_id] = {
-                    **updated_results[loser_id],
-                    "result": patched,
-                }
+            conflict = broken[i]
+            a_id, b_id = conflict["agent_a"], conflict["agent_b"]
+            
+            if canonical in (a_id, b_id):
+                loser_id = b_id if canonical == a_id else a_id
+                
+                if canonical_registry.get(loser_id) == "canonical":
+                     console.print(f"  [dim yellow]WARNING: Skipping {loser_id} patch to preserve established canonical status[/]")
+                     continue
+                if canonical_registry.get(canonical) == "non-canonical":
+                     console.print(f"  [dim yellow]WARNING: Skipping {loser_id} patch because {canonical} was previously overridden[/]")
+                     continue
+                     
+                canonical_registry[canonical] = "canonical"
+                canonical_registry[loser_id] = "non-canonical"
+                
+                # Bug 3: Garbage Patch Prevention
+                patch_len = len(patched)
+                original_len = len(updated_results[loser_id].get("result", ""))
+                
+                if patch_len < 200:
+                    console.print(f"  [dim yellow]WARNING: Skipping {loser_id} patch: Result is too short ({patch_len} chars)[/]")
+                    continue
+                
+                if original_len > 0 and patch_len < original_len * 0.2:
+                    console.print(f"  [dim yellow]WARNING: Skipping {loser_id} patch: Result is < 20% of original ({patch_len} vs {original_len} chars)[/]")
+                    continue
+
+                if loser_id in updated_results:
+                    updated_results[loser_id] = {
+                        **updated_results[loser_id],
+                        "result": patched,
+                    }
 
     return broken, updated_results

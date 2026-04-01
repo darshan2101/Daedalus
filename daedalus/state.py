@@ -10,13 +10,18 @@ class AgentSpec(TypedDict):
     parent_id:      Optional[str]
     specialist:     str          # coder|reasoner|drafter|creative|fast|researcher
 
-class StepResult(TypedDict):
+class StepResult(TypedDict, total=False):
     agent_id:       str
     task:           str
+    depth:          int
+    timestamp:      str
+    status:         str          # "done" | "failed" | "error"
     result:         str
-    score:          float
+    quality_score:  float
+    feedback:       str
     iterations:     int
-    frozen:         bool
+    output_path:    Optional[str]
+    error:          Optional[str]
 
 class BrokenInterface(TypedDict):
     agent_a:        str          # agent_id

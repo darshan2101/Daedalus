@@ -9,7 +9,7 @@ from rich.console import Console
 
 from daedalus.state import RunState, AgentSpec, StepResult
 from infra.mongo_client import update_run_status
-from infra.redis_client import is_frozen
+from infra.redis_client import is_frozen, freeze_agent
 from daedalus.sub_agent import run_agent_task
 
 console = Console()
@@ -98,13 +98,31 @@ class GlobalCoordinator:
                         
                         if "agent_results" not in self.state:
                             self.state["agent_results"] = {}
-                        self.state["agent_results"][agent["agent_id"]] = result
-                        
-                        if result.get("quality_score", 0.0) >= agent.get("threshold", 0.0):
-                            from infra.redis_client import freeze_agent
-                            freeze_agent(self.run_id, agent["agent_id"])
+                            
+                        if result.get("status") != "error":
+                            self.state["agent_results"][agent["agent_id"]] = result
 
-                await asyncio.gather(*[_run_with_sem(a) for a in wave])
+                            # Centralized threshold resolution
+                            agent_threshold = agent.get("threshold") or self.config.get("thresholds", {}).get(
+                                agent.get("output_type", "default"),
+                                self.config.get("thresholds", {}).get("default", 0.82)
+                            )
+                            
+                            if result.get("quality_score", 0.0) >= agent_threshold:
+                                freeze_agent(self.run_id, agent["agent_id"])
+                        else:
+                            console.print(f"  [yellow]⚠ {agent['agent_id']} errored — preserving previous output[/]")
+                            if agent["agent_id"] not in self.state["agent_results"]:
+                                self.state["agent_results"][agent["agent_id"]] = result
+
+                tasks = []
+                delay = self.config.get("runtime", {}).get("wave_delay_seconds", 0)
+                for index, agent in enumerate(wave):
+                    if delay > 0 and index > 0:
+                        await asyncio.sleep(delay)
+                    tasks.append(asyncio.create_task(_run_with_sem(agent)))
+                
+                await asyncio.gather(*tasks)
                 
                 await update_run_status(self.run_id, "running", self.state)
                 console.print(f"[dim grey italic]  Wave {i} complete. Checkpoint saved.[/]\n")
@@ -118,6 +136,8 @@ class GlobalCoordinator:
                 self.state.get("agent_results", {}),
                 self.state.get("dep_graph", {}),
                 self.run_id,
+                system_iteration=self.state.get("system_iteration", 0),
+                config=self.config
             )
             self.state["broken_interfaces"] = broken
             
@@ -129,7 +149,7 @@ class GlobalCoordinator:
             console.print(f"[bold green]✅ Aggregation complete. Output written to:[/] [white]{out_path}[/]")
 
             self.state["current_step"] = "evaluator"
-            await update_run_status(self.run_id, "evaluating", self.state)
+            await update_run_status(self.run_id, "running", self.state)
 
             from daedalus.evaluator import evaluate_run
             self.state = evaluate_run(self.run_id, self.state, self.config)
@@ -140,7 +160,7 @@ class GlobalCoordinator:
                 break
                 
             self.state["current_step"] = "repairing"
-            await update_run_status(self.run_id, "repairing", self.state)
+            await update_run_status(self.run_id, "running", self.state)
 
         # Mark done
         self.state["current_step"] = "done"

@@ -111,7 +111,7 @@ class LocalCoordinator:
 
         # Concatenate results
         merged_output_parts = []
-        total_score = 0.0
+        sub_scores = []
         total_iterations = 0
         all_passed = True
 
@@ -123,22 +123,22 @@ class LocalCoordinator:
             merged_output_parts.append(
                 f"--- SUB-AGENT: {sub_id} ---\n{sub_output}\n--- END SUB-AGENT ---"
             )
-            total_score += sub_score
+            sub_scores.append(sub_score)
             total_iterations += sr.get("iterations", 1)
 
             if sr.get("status") != "done":
                 all_passed = False
 
-        avg_score = total_score / len(sub_results) if sub_results else 0.0
+        min_score = min(sub_scores) if sub_scores else 0.0
         merged_output = "\n\n".join(merged_output_parts)
 
         return {
             "agent_id": parent_id,
             "task": self.parent_spec["task"],
             "result": merged_output,
-            "quality_score": avg_score,
+            "quality_score": min_score,
             "iterations": total_iterations,
-            "status": "done" if all_passed else "partial",
+            "status": "done" if all_passed else "failed",
             "output_path": f"outputs/workspace/{parent_id}",
             "error": None,
         }

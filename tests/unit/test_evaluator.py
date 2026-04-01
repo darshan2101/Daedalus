@@ -1,60 +1,48 @@
 import pytest
-from daedalus.state import RunState
+from unittest.mock import patch, AsyncMock
 from daedalus.evaluator import evaluate_run
-import daedalus.evaluator
 
 @pytest.fixture
-def mock_state() -> RunState:
+def mock_config():
     return {
-        "run_id": "test_run_123",
+        "thresholds": {"default": 0.82},
+        "evaluation_weights": {
+            "default": {
+                "correctness": 1.0,
+                "completeness": 0.0,
+                "consistency": 0.0,
+                "runnability": 0.0,
+                "format": 0.0
+            }
+        }
+    }
+
+@pytest.fixture
+def mock_state():
+    return {
         "goal": "Test Goal",
-        "preset": "docs",
-        "agent_specs": [
-            {"agent_id": "ag_1", "task": "Task 1", "specialist": "reasoner"},
-            {"agent_id": "ag_2", "task": "Task 2", "specialist": "coder"}
-        ],
-        "combined_result": "Here is the final combined output..."
+        "preset": "default",
+        "combined_result": "Result text",
+        "agent_specs": []
     }
 
-def test_evaluate_run_success(mock_state, monkeypatch):
-    # Mock LLM response to simulate a perfect valid JSON return
-    mock_json_str = '''
-    {
-      "system_score": 0.92,
-      "breakdown": "The response was quite good, missing a minor detail.",
-      "weakest_agents": ["ag_2"]
-    }
-    '''
+def test_evaluator_retry_on_failure(mock_state, mock_config):
+    # First attempt fails, second succeeds
+    responses = [Exception("LLM Timeout"), '{"dimensions": {"correctness": 0.9}, "breakdown": "ok", "weakest_agents": []}']
     
-    # We patch inside the module where _call_with_fallback was imported
-    monkeypatch.setattr(daedalus.evaluator, "_call_with_fallback", lambda models, sys, user: mock_json_str)
+    with patch("daedalus.evaluator._call_with_fallback", side_effect=responses):
+        state = evaluate_run("run_123", mock_state, mock_config)
     
-    updated_state = evaluate_run("test_run_123", mock_state, {})
-    
-    assert updated_state.get("system_score") == 0.92
-    assert "quite good" in updated_state.get("breakdown", "")
-    assert updated_state.get("weakest_agents") == ["ag_2"]
+    assert state["system_score"] == 0.9
+    assert state["breakdown"] == "ok"
 
-def test_evaluate_run_empty_weakest_agents(mock_state, monkeypatch):
-    mock_json_str = '''
-    {
-      "system_score": 0.98,
-      "breakdown": "Excellent.",
-      "weakest_agents": []
-    }
-    '''
-    monkeypatch.setattr(daedalus.evaluator, "_call_with_fallback", lambda models, sys, user: mock_json_str)
+def test_evaluator_permanent_failure_first_run_uses_sentinel(mock_state, mock_config):
+    # No system_score in state — first ever evaluation, both fail
+    assert "system_score" not in mock_state
+    responses = [Exception("Fail 1"), Exception("Fail 2")]
     
-    updated_state = evaluate_run("test_run_123", mock_state, {})
-    assert updated_state.get("system_score") == 0.98
-    assert updated_state.get("weakest_agents") == []
-
-def test_evaluate_run_json_error(mock_state, monkeypatch):
-    # If the LLM returns garbage
-    monkeypatch.setattr(daedalus.evaluator, "_call_with_fallback", lambda models, sys, user: "Sorry, I cannot help with that.")
+    with patch("daedalus.evaluator._call_with_fallback", side_effect=responses):
+        state = evaluate_run("run_123", mock_state, mock_config)
     
-    updated_state = evaluate_run("test_run_123", mock_state, {})
-    
-    # Should safely fail and assign 0.0
-    assert updated_state.get("system_score") == 0.0
-    assert updated_state.get("weakest_agents") == []
+    # Should be -1.0 sentinel, NOT 0.0
+    assert state["system_score"] == -1.0

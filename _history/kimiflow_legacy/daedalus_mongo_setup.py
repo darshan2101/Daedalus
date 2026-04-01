@@ -9,7 +9,7 @@ from dotenv import load_dotenv
 from pymongo import MongoClient, ASCENDING, DESCENDING
 from pymongo.errors import CollectionInvalid
 
-load_dotenv()
+load_dotenv(override=True)
 
 MONGODB_URI = os.getenv("MONGODB_URI")
 MONGODB_DB  = os.getenv("MONGODB_DB", "Daedalus")

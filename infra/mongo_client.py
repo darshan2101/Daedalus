@@ -1,5 +1,8 @@
 import os
 from motor.motor_asyncio import AsyncIOMotorClient
+from dotenv import load_dotenv
+
+load_dotenv(override=True)
 
 _client: AsyncIOMotorClient | None = None
 
@@ -10,7 +13,18 @@ def get_db():
     return _client[os.getenv("MONGODB_DB", "Daedalus")]
 
 async def insert_checkpoint(run_id: str, agent_id: str, data: dict):
-    await get_db().checkpoints.insert_one({"run_id": run_id, "agent_id": agent_id, **data})
+    # Remove agent_id and run_id from data to avoid $set conflict with filter keys or internal IDs
+    clean_data = {k: v for k, v in data.items() if k not in ("run_id", "agent_id", "_id")}
+    # Re-insert them explicitly if needed for the document structure, 
+    # but the filter already covers the primary uniqueness.
+    clean_data["run_id"] = run_id
+    clean_data["agent_id"] = agent_id
+    
+    await get_db().checkpoints.update_one(
+        {"run_id": run_id, "agent_id": agent_id},
+        {"$set": clean_data},
+        upsert=True
+    )
 
 async def get_checkpoints(run_id: str) -> list[dict]:
     return await get_db().checkpoints.find({"run_id": run_id}).to_list(None)
@@ -57,3 +71,6 @@ async def update_run_status(run_id: str, status: str, state_update: dict = None)
         }, 
         upsert=True
     )
+
+async def get_run(run_id: str) -> dict:
+    return await get_db().runs.find_one({"_id": run_id})

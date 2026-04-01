@@ -11,7 +11,13 @@ def repair_if_needed(run_id: str, state: RunState, config: dict) -> tuple[bool, 
     Returns (True, state) if repair is triggered, (False, state) if not.
     """
     score = state.get("system_score", 0.0)
-    threshold = config.get("thresholds", {}).get("system", 0.85)
+    if score < 0:
+        return False, state
+    
+    # R1: Use specific threshold for the output_type instead of global system fallback
+    output_type = state.get("output_type", "default")
+    thresholds = config.get("thresholds", {})
+    threshold = thresholds.get(output_type, thresholds.get("default", 0.82))
 
     if score >= threshold:
         # Pass
@@ -45,6 +51,39 @@ def repair_if_needed(run_id: str, state: RunState, config: dict) -> tuple[bool, 
     console.print(f"\\n[bold yellow]🛠️  Repair pass {state['repair_attempts']}/{max_attempts} triggered![/]")
     console.print(f"    [dim]Score: {score} < {threshold}[/]")
     console.print(f"    [dim]Unfreezing agents: {', '.join(weakest)}[/]")
+
+    # Identify relevant conflicts for each agent
+    broken = state.get("broken_interfaces", [])
+    repair_context = {}
+    for aid in weakest:
+        relevant = [
+            c["description"] for c in broken 
+            if aid in (c["agent_a"], c["agent_b"])
+        ]
+        if relevant:
+            repair_context[aid] = relevant
+
+    state["repair_context"] = repair_context
+
+    # H1: Global Constraint reminder to prevent language drift
+    goal = state.get("goal", "")
+    if goal:
+        for aid in weakest:
+            if aid not in state["repair_context"]:
+                state["repair_context"][aid] = []
+            state["repair_context"][aid].append(
+                f"GLOBAL CONSTRAINT: The entire system goal is: '{goal}'. "
+                f"Your output MUST use the same language and framework as the "
+                f"original plan. Do NOT switch languages or frameworks."
+            )
+
+    # Also inject relevant evaluator feedback
+    breakdown = state.get("breakdown", "")
+    if breakdown:
+        for aid in weakest:
+            if aid not in state["repair_context"]:
+                state["repair_context"][aid] = []
+            state["repair_context"][aid].append(f"SYSTEM EVALUATOR FEEDBACK: {breakdown}")
 
     # Unfreeze
     for aid in weakest:

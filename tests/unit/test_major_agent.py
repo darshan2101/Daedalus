@@ -2,6 +2,7 @@
 import pytest
 import json
 from unittest.mock import patch, AsyncMock, MagicMock
+import daedalus.local_coordinator
 
 
 class TestMajorAgentRouting:
@@ -92,7 +93,7 @@ class TestMajorAgentRouting:
             with patch("daedalus.major_agent.run_agent_task", new_callable=AsyncMock, return_value=mock_result):
                 from daedalus.major_agent import MajorAgent
                 agent = MajorAgent(
-                    self._make_spec(task="A" * 300),  # > 200 chars to trigger LLM
+                    self._make_spec(task="A" * 900),  # > 800 chars to trigger LLM
                     self._make_config(), self._make_state(),
                 )
                 result = await agent.run()
@@ -119,7 +120,7 @@ class TestMajorAgentRouting:
                        new_callable=AsyncMock, return_value=mock_local_result):
                 from daedalus.major_agent import MajorAgent
                 agent = MajorAgent(
-                    self._make_spec(task="A" * 300),
+                    self._make_spec(task="A" * 900),
                     self._make_config(), self._make_state(),
                 )
                 result = await agent.run()
@@ -144,7 +145,7 @@ class TestMajorAgentRouting:
                            new_callable=AsyncMock, side_effect=RuntimeError("depth exceeded")):
                     from daedalus.major_agent import MajorAgent
                     agent = MajorAgent(
-                        self._make_spec(task="A" * 300),
+                        self._make_spec(task="A" * 900),
                         self._make_config(), self._make_state(),
                     )
                     result = await agent.run()
@@ -163,7 +164,7 @@ class TestMajorAgentRouting:
             with patch("daedalus.major_agent.run_agent_task", new_callable=AsyncMock, return_value=mock_result):
                 from daedalus.major_agent import MajorAgent
                 agent = MajorAgent(
-                    self._make_spec(task="A" * 300),
+                    self._make_spec(task="A" * 900),
                     self._make_config(), self._make_state(),
                 )
                 result = await agent.run()

@@ -80,6 +80,7 @@ def test_aggregate_main_function(mock_state, tmp_path, monkeypatch):
     
     # Test docs routing
     mock_state["preset"] = "docs"
+    mock_state["output_type"] = "docs"
     updated_state = aggregate("test_run_123", mock_state, {})
     
     assert "combined_result" in updated_state
@@ -89,8 +90,47 @@ def test_aggregate_main_function(mock_state, tmp_path, monkeypatch):
     
     # Test code routing
     mock_state["preset"] = "code"
+    mock_state["agent_results"]["ag_1"] = {"result": "--- FILE: src/main.py ---\nprint('overwritten')\n--- END FILE ---"}
     updated_state = aggregate("test_run_123", mock_state, {})
     
     assert "combined_result" in updated_state
     assert "output_path" in updated_state
     assert "final_code" in updated_state["output_path"]
+    
+    # Check that combined_result includes the actual code blocks
+    expected_path = "src/main.py"
+    assert f"### File: `{expected_path}`" in updated_state["combined_result"]
+    assert "print('overwritten')" in updated_state["combined_result"]
+
+def test_aggregate_routes_by_output_type_code_on_default_preset(
+    mock_state, tmp_path, monkeypatch
+):
+    """H3 fix: output_type='code' with preset='default' must use _aggregate_code."""
+    monkeypatch.setattr("daedalus.aggregator.get_run_dir", lambda r: str(tmp_path))
+    
+    # Explicitly set the combination we're testing
+    mock_state["preset"] = "default"       # NOT saas, NOT code
+    mock_state["output_type"] = "code"     # code output type
+    mock_state["agent_results"]["ag_1"] = {
+        "result": "--- FILE: app.py ---\nprint('hello')\n--- END FILE ---"
+    }
+    
+    updated_state = aggregate("test_run_123", mock_state, {})
+    
+    # Should have routed to _aggregate_code and populated final_code/
+    assert "final_code" in updated_state["output_path"]
+    assert "### File: `app.py`" in updated_state["combined_result"]
+
+def test_aggregate_docs_preset_with_docs_output_type_uses_docs(
+    mock_state, tmp_path, monkeypatch
+):
+    """Complement: preset='docs' AND output_type='docs' must use _aggregate_docs."""
+    monkeypatch.setattr("daedalus.aggregator.get_run_dir", lambda r: str(tmp_path))
+    
+    mock_state["preset"] = "docs"
+    mock_state["output_type"] = "docs"
+    
+    updated_state = aggregate("test_run_123", mock_state, {})
+    
+    # Should have routed to _aggregate_docs and populated FINAL.md
+    assert "FINAL.md" in updated_state["output_path"]

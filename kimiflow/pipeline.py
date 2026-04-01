@@ -30,6 +30,7 @@ class PipelineState(TypedDict):
     assigned_model: str
     result:         str
     quality_score:  float
+    threshold:      float
     feedback:       str
     iterations:     int
 
@@ -93,20 +94,22 @@ def should_retry(state: PipelineState) -> Literal["execute", "done"]:
     next_model = state["assigned_model"]
     iters      = state["iterations"]
 
+    threshold = state.get("threshold", 0.85)
+
     # ── Hard cap ──────────────────────────────────────────────────────────────
     if iters >= 15:
         print(f"[Router] Max 15 iterations reached (score={score:.2f}) — accepting result.")
         return "done"
 
     # ── Both signals agree: quality met ───────────────────────────────────────
-    if score >= 0.85 and next_model == "done":
-        print(f"[Router] Score {score:.2f} ≥ 0.85 and evaluator says done — finishing.")
+    if score >= threshold and next_model == "done":
+        print(f"[Router] Score {score:.2f} ≥ {threshold} and evaluator says done — finishing.")
         return "done"
 
     # ── Score met but evaluator still wants a retry ───────────────────────────
     # Trust the score; a good result should not be re-run unnecessarily.
-    if score >= 0.85:
-        print(f"[Router] Score {score:.2f} ≥ 0.85 — accepting result "
+    if score >= threshold:
+        print(f"[Router] Score {score:.2f} ≥ {threshold} — accepting result "
               f"(evaluator suggested '{next_model}' but score threshold met).")
         return "done"
 
@@ -117,7 +120,7 @@ def should_retry(state: PipelineState) -> Literal["execute", "done"]:
 
     # ── Retry ─────────────────────────────────────────────────────────────────
     print(
-        f"[Router] Score {score:.2f} < 0.85 on iteration {iters} "
+        f"[Router] Score {score:.2f} < {threshold} on iteration {iters} "
         f"— retrying with '{next_model}'"
     )
     return "execute"

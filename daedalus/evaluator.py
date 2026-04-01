@@ -22,18 +22,25 @@ Final Assembled Output:
 {combined_result}
 
 INSTRUCTIONS:
-1. Analyze the assembled output. Does it completely, accurately, and beautifully fulfill the original goal?
-2. Score the system out of 1.0 (float). 
-   - 0.95+ = Excellent, ready to ship.
-   - 0.85-0.94 = Good, minor issues but passing.
-   - < 0.85 = Needs repair (missing major requirements, broken code, logical holes, or failure to follow instructions).
-3. Provide a brief explanation of your score in 'breakdown'.
-4. If the score is < 0.85, identify the 'weakest_agents' by their agent_id (e.g. "ag_5b2d") based on the Agent Specifications and where the output fell short. If it's a passing run (>0.85), you can leave weakest_agents empty.
+1. Analyze the assembled output. You must score it across 5 dimensions, each out of 1.0.
+   - correctness: Logic, accuracy, and lack of bugs.
+   - completeness: Are all requested features/requirements present?
+   - consistency: Internal coherence, architectural alignment, variable naming.
+   - runnability: Does it look like it will actually run/compile without crashing?
+   - format: Cleanliness, structure, and adherence to standard patterns.
+2. Provide a brief explanation of your scoring in 'breakdown'.
+3. Identify the 'weakest_agents' by their agent_id (e.g. "ag_5b2d") based on the Agent Specifications and where the output fell short. If it's a perfect run, leave weakest_agents empty.
 
 You MUST respond in valid JSON format ONLY:
 {{
-  "system_score": 0.95,
-  "breakdown": "Explanation of the score...",
+  "dimensions": {{
+    "correctness": 0.95,
+    "completeness": 0.90,
+    "consistency": 0.85,
+    "runnability": 0.80,
+    "format": 0.95
+  }},
+  "breakdown": "Explanation of the scores...",
   "weakest_agents": ["ag_1a2b"] 
 }}
 """
@@ -51,8 +58,6 @@ def evaluate_run(run_id: str, state: RunState, config: dict) -> RunState:
         specs_summary.append(f"- {s.get('agent_id')} ({s.get('specialist')}): {s.get('task')}")
     specs_text = "\n".join(specs_summary)
 
-    # Truncate combined result if it's insanely massive, preserving most of it.
-    # We will pass up to 100,000 characters to be safe for 128k context models.
     safe_result = combined_result[:100000]
 
     system_msg = "You are a top-tier software architect grading a system's output. Output ONLY valid JSON."
@@ -63,29 +68,66 @@ def evaluate_run(run_id: str, state: RunState, config: dict) -> RunState:
         combined_result=safe_result
     )
     
-    try:
-        raw_response = _call_with_fallback(EVALUATOR_MODELS, system_msg, user_msg)
-        parsed = _parse_json(raw_response)
-        
-        score = float(parsed.get("system_score", 0.0))
-        breakdown = parsed.get("breakdown", "No breakdown provided.")
-        weakest = parsed.get("weakest_agents", [])
-        
-        if not isinstance(weakest, list):
-            weakest = []
+    max_eval_retries = 2
+    for attempt in range(max_eval_retries):
+        try:
+            raw_response = _call_with_fallback(EVALUATOR_MODELS, system_msg, user_msg)
+            parsed = _parse_json(raw_response)
             
-        state["system_score"] = score
-        state["breakdown"] = breakdown
-        state["weakest_agents"] = weakest
-        
-        console.print(f"  [cyan]System Score:[/] [bold {'green' if score >= 0.85 else 'red'}]{score}[/]")
-        console.print(f"  [cyan]Breakdown:[/] {breakdown}")
-        if weakest:
-            console.print(f"  [cyan]Weakest Agents:[/] {', '.join(weakest)}")
+            dimensions = parsed.get("dimensions", {})
             
-    except Exception as e:
-        console.print(f"  [bold red]Evaluator Error:[/] {e}")
-        state["system_score"] = 0.0
-        state["weakest_agents"] = []
-        
+            # Pull weights from config based on preset, fallback to default
+            eval_weights_config = config.get("evaluation_weights", {})
+            weights = eval_weights_config.get(preset, eval_weights_config.get("default", {
+                "correctness": 0.30,
+                "completeness": 0.20,
+                "consistency": 0.20,
+                "runnability": 0.20,
+                "format": 0.10
+            }))
+            
+            # Calculate weighted average
+            score = 0.0
+            for dim, weight in weights.items():
+                dim_score = float(dimensions.get(dim, 0.0))
+                score += dim_score * float(weight)
+
+            breakdown = parsed.get("breakdown", "No breakdown provided.")
+            weakest = parsed.get("weakest_agents", [])
+            
+            if not isinstance(weakest, list):
+                weakest = []
+                
+            state["system_score"] = float(score)
+            state["dimensions"] = dimensions
+            state["breakdown"] = breakdown
+            state["weakest_agents"] = weakest
+            
+            # Determine threshold for color coding print target
+            output_type = state.get("output_type", "default")
+            thresholds = config.get("thresholds", {})
+            threshold = thresholds.get(output_type, thresholds.get("default", 0.82))
+
+            console.print(f"  [cyan]System Score:[/] [bold {'green' if score >= threshold else 'red'}]{score:.2f}[/]")
+            
+            console.print(f"  [cyan]Dimensions:[/] ")
+            for dim, dim_score in dimensions.items():
+                console.print(f"    - {dim.capitalize()}: {dim_score} (weight: {weights.get(dim, 0.0)})")
+                
+            console.print(f"  [cyan]Breakdown:[/] {breakdown}")
+            if weakest:
+                console.print(f"  [cyan]Weakest Agents:[/] {', '.join(weakest)}")
+                
+            return state
+
+        except Exception as e:
+            console.print(f"  [bold yellow]Evaluator Attempt {attempt+1} failed:[/] {e}")
+            if attempt == max_eval_retries - 1:
+                # Permanent failure: Use sentinel if no score exists
+                if "system_score" not in state:
+                    state["system_score"] = -1.0  # sentinel: evaluation failed
+                
+                state["weakest_agents"] = state.get("weakest_agents", [])
+                console.print(f"  [bold red]Evaluator permanently failed. Score preserved or set to sentinel (-1.0).[/]")
+    
     return state

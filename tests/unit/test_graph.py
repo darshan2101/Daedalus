@@ -34,6 +34,15 @@ class TestGraphRouting:
             "repair_attempts": 3,  # at max
         }
         assert route_after_eval(state) == "done"
+    def test_route_after_eval_sentinel(self):
+        """Sentinel score (-1.0) routes to 'done' (skip repair)."""
+        from daedalus.graph import route_after_eval
+        state = {
+            "config": {"thresholds": {"system": 0.85}, "runtime": {"max_repair_attempts": 3}},
+            "system_score": -1.0,
+            "repair_attempts": 0,
+        }
+        assert route_after_eval(state) == "done"
 
     def test_route_after_repair_loops_back(self):
         """When should_repair is True, routes back to 'execute'."""
@@ -83,3 +92,31 @@ class TestGraphState:
         annotations = DaedalusGraphState.__annotations__
         for key in expected:
             assert key in annotations, f"Missing key: {key}"
+
+@pytest.mark.asyncio
+async def test_evaluate_node_persists_state():
+    """Regression test: evaluate_node must save iteration/repair counts to DB."""
+    from daedalus.graph import evaluate_node
+    from unittest.mock import AsyncMock, patch
+    
+    state = {
+        "run_id": "r1",
+        "system_iteration": 2,
+        "repair_attempts": 1,
+        "config": {"thresholds": {}},
+        "agent_results": {}
+    }
+    
+    # Mock evaluate_run to return simple state
+    mock_eval = lambda rid, s, cfg: {**s, "system_score": 0.8}
+    
+    with patch("daedalus.evaluator.evaluate_run", side_effect=mock_eval):
+        with patch("infra.mongo_client.update_run_status", new_callable=AsyncMock) as mock_update:
+            await evaluate_node(state)
+            
+            # Verify update_run_status was called with correct persistence data
+            assert mock_update.called
+            args, kwargs = mock_update.call_args
+            state_update = args[2]
+            assert state_update["system_iteration"] == 2
+            assert state_update["repair_attempts"] == 1

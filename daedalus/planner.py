@@ -30,13 +30,21 @@ Rules:
 - All dep_graph entries must reference valid agent_ids
 - No circular dependencies
 - threshold cannot be lower than default for output_type
-- SaaS apps always need: schema, backend, auth, frontend, docs agents minimum
+- Avoid spawning agents for trivial tasks like single dependency files (e.g. requirements.txt, .gitignore). These should be part of the main coding agent's output.
+- Every agent must have a unique agent_id.
+- When multiple agents interact via API (frontend<->backend, auth<->backend), specify the EXACT endpoint path, method, and auth requirement in BOTH agents' task descriptions so they share a common contract.
+- Example: if ag_auth secures POST /api/report, ag_front's task must explicitly state "call POST /api/report with JWT Bearer token in header".
+- Always output valid JSON strictly matching the format above.
 """
 
 async def plan_goal(goal: str, preset: str, config: dict) -> dict:
     import asyncio
     
-    user_msg = f"Goal: {goal}\nPreset: {preset}"
+    saas_rule = ""
+    if preset == "saas":
+        saas_rule = "\n- Rule: SaaS apps always need: schema, backend, auth, frontend, docs agents minimum"
+
+    user_msg = f"Goal: {goal}\nPreset: {preset}{saas_rule}"
     raw = None
     
     # ── Try Ollama Cloud first (if configured and enabled) ────────────────

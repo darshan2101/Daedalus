@@ -103,7 +103,7 @@ class TestLocalCoordinator:
         assert result["agent_id"] == "ag_parent"
         assert "output 1" in result["result"]
         assert "output 2" in result["result"]
-        assert result["quality_score"] == pytest.approx(0.89, abs=0.01)
+        assert result["quality_score"] == pytest.approx(0.88, abs=0.01)
         assert result["status"] == "done"
 
     @pytest.mark.asyncio
@@ -118,8 +118,8 @@ class TestLocalCoordinator:
         assert result["quality_score"] == 0.0
 
     @pytest.mark.asyncio
-    async def test_partial_failure_marked_partial(self):
-        """If some sub-agents fail, merged status is 'partial'."""
+    async    def test_partial_failure_marked_failed(self):
+        """If some sub-agents fail, merged status is 'failed' (not 'partial')."""
         from daedalus.local_coordinator import LocalCoordinator
         coord = LocalCoordinator(
             self._make_parent_spec(), self._make_config(), self._make_state(),
@@ -131,4 +131,4 @@ class TestLocalCoordinator:
              "iterations": 1, "status": "failed"},
         ]
         result = coord._merge_sub_results(sub_results)
-        assert result["status"] == "partial"
+        assert result["status"] == "failed"

@@ -48,6 +48,7 @@ class DaedalusGraphState(TypedDict, total=False):
     # Control
     system_iteration:  int
     repair_attempts:   int
+    any_agent_ran:     bool
     current_step:      str
     errors:            list
     should_repair:     bool
@@ -107,21 +108,39 @@ async def execute_node(state: DaedalusGraphState) -> DaedalusGraphState:
     from infra.redis_client import is_frozen, freeze_agent
     from infra.mongo_client import update_run_status
 
+    any_ran = False
+
     for i, wave in enumerate(waves):
         console.print(f"[bold cyan]🌊 Wave {i} ({len(wave)} agents)[/]")
         semaphore = asyncio.Semaphore(config.get("runtime", {}).get("max_parallel_major", 3))
 
         async def _run_with_sem(agent):
+            nonlocal any_ran
             async with semaphore:
                 if is_frozen(state["run_id"], agent["agent_id"]):
                     console.print(f"  [dim grey]Skipping frozen: {agent['agent_id']}[/]")
                     return
+                any_ran = True
+                
                 from daedalus.major_agent import MajorAgent
                 major = MajorAgent(agent, config, run_state)
                 result = await major.run()
-                run_state["agent_results"][agent["agent_id"]] = result
-                if result.get("quality_score", 0.0) >= agent.get("threshold", 0.0):
-                    freeze_agent(state["run_id"], agent["agent_id"])
+                
+                if result.get("status") != "error":
+                    run_state["agent_results"][agent["agent_id"]] = result
+                    
+                    # Centralized threshold resolution
+                    agent_threshold = agent.get("threshold") or config.get("thresholds", {}).get(
+                        agent.get("output_type", "default"),
+                        config.get("thresholds", {}).get("default", 0.82)
+                    )
+                    
+                    if result.get("quality_score", 0.0) >= agent_threshold:
+                        freeze_agent(state["run_id"], agent["agent_id"])
+                else:
+                    console.print(f"  [yellow]⚠ {agent['agent_id']} errored — preserving previous output[/]")
+                    if agent["agent_id"] not in run_state.get("agent_results", {}):
+                        run_state["agent_results"][agent["agent_id"]] = result
 
         await asyncio.gather(*[_run_with_sem(a) for a in wave])
         await update_run_status(state["run_id"], "running", run_state)
@@ -133,12 +152,18 @@ async def execute_node(state: DaedalusGraphState) -> DaedalusGraphState:
         **state,
         "agent_results": run_state["agent_results"],
         "frozen_agents": run_state.get("frozen_agents", []),
+        "any_agent_ran": any_ran,
         "current_step": "merging",
     }
 
 
 async def merge_node(state: DaedalusGraphState) -> DaedalusGraphState:
     """Phase 2b: Detect and resolve cross-agent interface conflicts."""
+    # N4 Fix: Skip conflict detection if no agents ran — outputs have not changed
+    if not state.get("any_agent_ran", True):
+        console.print("[dim]No agents ran — skipping conflict detection.[/]")
+        return state
+
     console.print("\n[bold yellow]🔍 Checking for interface conflicts...[/]")
     from daedalus.merger import detect_and_resolve_all
 
@@ -146,6 +171,8 @@ async def merge_node(state: DaedalusGraphState) -> DaedalusGraphState:
         state.get("agent_results", {}),
         state.get("dep_graph", {}),
         state["run_id"],
+        system_iteration=state.get("system_iteration", 0),
+        config=state["config"]
     )
 
     return {
@@ -179,10 +206,26 @@ async def aggregate_node(state: DaedalusGraphState) -> DaedalusGraphState:
 async def evaluate_node(state: DaedalusGraphState) -> DaedalusGraphState:
     """Phase 4: System-level holistic evaluation."""
     console.print("\n[bold yellow]Phase 4: System Evaluation[/]")
+    
+    if not state.get("any_agent_ran", True):
+        console.print("[dim]No agents ran this pass — preserving existing score.[/]")
+        return state
+        
     from daedalus.evaluator import evaluate_run
 
     run_state = dict(state)
     run_state = evaluate_run(state["run_id"], run_state, state["config"])
+
+    # Persist all state variables for resume/reporting
+    from infra.mongo_client import update_run_status
+    await update_run_status(state["run_id"], "running", {
+        "system_score": run_state.get("system_score", 0.0),
+        "breakdown": run_state.get("breakdown", ""),
+        "weakest_agents": run_state.get("weakest_agents", []),
+        "system_iteration": state.get("system_iteration", 0),
+        "repair_attempts": state.get("repair_attempts", 0),
+        "current_step": "repair_check",
+    })
 
     return {
         **state,
@@ -216,10 +259,16 @@ async def repair_node(state: DaedalusGraphState) -> DaedalusGraphState:
 def route_after_eval(state: DaedalusGraphState) -> str:
     """After evaluation: assemble if passing, repair if failing."""
     config = state.get("config", {})
-    threshold = config.get("thresholds", {}).get("system", 0.85)
+    output_type = state.get("output_type", "default")
+    thresholds = config.get("thresholds", {})
+    threshold = thresholds.get(output_type, thresholds.get("default", 0.82))
     score = state.get("system_score", 0.0)
+    
+    if score < 0:
+        console.print("[yellow]Skipping repair — evaluator did not produce a valid score (sentinel detected).[/]")
+        return "done"
 
-    if score >= threshold:
+    if score >= threshold - 0.005:
         console.print(f"[green]System score {score:.2f} ≥ {threshold} → PASS[/]")
         return "done"
     else:

@@ -17,7 +17,7 @@ import asyncio
 from typing import Optional
 from dotenv import load_dotenv
 
-load_dotenv()
+load_dotenv(override=True)
 
 _OLLAMA_API_KEY = os.getenv("OLLAMA_API_KEY", "")
 _OLLAMA_HOST = "https://ollama.com"

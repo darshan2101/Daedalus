@@ -54,3 +54,9 @@ class TestTightenThresholds:
         specs = [{"agent_id": "ag_a", "output_type": "video", "threshold": 0.50}]
         result = _tighten_thresholds(specs, config)
         assert result[0]["threshold"] >= 0.82
+
+    def test_modular_output_type_uses_default_threshold(self):
+        config = {"thresholds": {"code": 0.88, "default": 0.82}}
+        specs = [{"agent_id": "ag_a", "output_type": "modular", "threshold": 0.50}]
+        result = _tighten_thresholds(specs, config)
+        assert result[0]["threshold"] >= 0.82

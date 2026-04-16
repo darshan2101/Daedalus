@@ -11,12 +11,12 @@ You are the Daedalus Meta-Orchestrator. Given a goal, decompose it into major ta
 Output ONLY valid JSON:
 {
   "plan": "<one paragraph strategy>",
-  "output_type": "<code|docs|design|research>",
+  "output_type": "<code|docs|design|research|modular>",
   "agent_specs": [
     {
       "agent_id": "ag_<4chars>",
       "task": "<specific task description>",
-      "output_type": "<code|docs|design|research>",
+      "output_type": "<code|docs|design|research|modular>",
       "threshold": 0.88,
       "dependencies": ["ag_xxxx"],
       "specialist": "<coder|reasoner|drafter|creative|fast|researcher>"
@@ -30,6 +30,7 @@ Rules:
 - All dep_graph entries must reference valid agent_ids
 - No circular dependencies
 - threshold cannot be lower than default for output_type
+- Use output_type 'modular' for agents whose task involves building multi-component systems with independently testable modules
 - Avoid spawning agents for trivial tasks like single dependency files (e.g. requirements.txt, .gitignore). These should be part of the main coding agent's output.
 - Every agent must have a unique agent_id.
 - When multiple agents interact via API (frontend<->backend, auth<->backend), specify the EXACT endpoint path, method, and auth requirement in BOTH agents' task descriptions so they share a common contract.
@@ -98,9 +99,19 @@ async def plan_goal(goal: str, preset: str, config: dict) -> dict:
     _validate_dag(specs, dep_graph)
     specs = _tighten_thresholds(specs, config)
     
+    
+    final_output_type = parsed.get("output_type", "code")
+    
+    if final_output_type == "modular":
+        for s in specs:
+            if s.get("output_type") == "code":
+                s["output_type"] = "modular"
+
+    print(f"  [planner] Generated plan with output_type: '{final_output_type}'")
+    
     return {
         "plan": parsed.get("plan", ""),
-        "output_type": parsed.get("output_type", "code"),
+        "output_type": final_output_type,
         "agent_specs": specs,
         "dep_graph": dep_graph
     }

@@ -12,6 +12,7 @@ from infra.mongo_client import update_run_status
 from infra.redis_client import is_frozen, freeze_agent
 from daedalus.sub_agent import run_agent_task
 
+
 console = Console()
 
 class GlobalCoordinator:
@@ -91,10 +92,42 @@ class GlobalCoordinator:
                             console.print(f"  [dim grey]Skipping frozen agent: {agent['agent_id']} (Cached)[/]")
                             return
                         
-                        # Call MajorAgent — it decides direct vs fragment
-                        from daedalus.major_agent import MajorAgent
-                        major = MajorAgent(agent, self.config, self.state)
-                        result = await major.run()
+                        if agent.get("output_type") == "modular":
+                            from daedalus.component_generator import ComponentGenerator
+                            console.print(f"  [bold green]🛠️ Delegating {agent['agent_id']} to Modular Generation Engine[/]")
+                            from kimiflow.agents import drafter_execute, coder_execute, evaluator_score
+                            from daedalus.test_validator import TestValidator
+                            
+                            validator = TestValidator()
+                            
+                            async def async_drafter(*args, **kwargs):
+                                return await asyncio.to_thread(drafter_execute, *args, **kwargs)
+                                
+                            async def async_coder(*args, **kwargs):
+                                return await asyncio.to_thread(coder_execute, *args, **kwargs)
+                                
+                            async def async_evaluator(*args, **kwargs):
+                                return await asyncio.to_thread(evaluator_score, *args, **kwargs)
+        
+                            async def async_fast(tests_code, impl_code):
+                                return await validator.validate_module(".", tests_code, impl_code)
+
+                            generator = ComponentGenerator(
+                                config=self.config,
+                                drafter_fn=async_drafter,
+                                coder_fn=async_coder,
+                                fast_fn=async_fast,
+                                evaluator_fn=async_evaluator
+                            )
+                            
+                            result = await generator.generate_module(agent)
+                            if "quality_score" not in result:
+                                result["quality_score"] = result.get("score", 0.0)
+                        else:
+                            # Call MajorAgent — it decides direct vs fragment
+                            from daedalus.major_agent import MajorAgent
+                            major = MajorAgent(agent, self.config, self.state)
+                            result = await major.run()
                         
                         if "agent_results" not in self.state:
                             self.state["agent_results"] = {}

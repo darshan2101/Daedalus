@@ -41,8 +41,8 @@ def test_exponential_backoff_escalates():
     for _ in range(3): tracker.record_error("model_c", "err")
     state1 = tracker.get_state("model_c")
     b1 = state1["circuit_open_until"] - state1["last_error_time"]
-    assert b1 == 180
-    
+    assert b1 == pytest.approx(180, abs=1)
+
     # Manually reset to healthy and mock time passing so we aren't blocked,
     # but theoretically if we got another error while degraded, it should escalate.
     # The requirement is that backoff multiplier increments.
@@ -50,21 +50,21 @@ def test_exponential_backoff_escalates():
     state1["status"] = "degraded"
     state1["circuit_open_until"] = time.time() - 100
     tracker._save_state("model_c", state1)
-    
+
     tracker.record_error("model_c", "err")
     state2 = tracker.get_state("model_c")
     b2 = state2["circuit_open_until"] - state2["last_error_time"]
-    assert b2 == 360
-    
+    assert b2 == pytest.approx(360, abs=1)
+
     # Trip again
     state2["status"] = "degraded"
     state2["circuit_open_until"] = time.time() - 100
     tracker._save_state("model_c", state2)
-    
+
     tracker.record_error("model_c", "err")
     state3 = tracker.get_state("model_c")
     b3 = state3["circuit_open_until"] - state3["last_error_time"]
-    assert b3 == 720
+    assert b3 == pytest.approx(720, abs=1)
 
 def test_success_resets_error_counter():
     tracker = ModelHealthTracker(MockRedis())

@@ -288,3 +288,46 @@ class TestCrossProvider:
             OPENROUTER_BASE, OPENROUTER_KEY,
             "nvidia/nemotron-3-super-120b-a12b:free", "sys", "usr", 0.7
         )
+
+
+# ── _parse_json ───────────────────────────────────────────────────────────────
+
+class TestParseJson:
+    """_parse_json must survive the common malformed outputs from real models."""
+
+    def test_clean_json_parses(self):
+        from kimiflow.agents import _parse_json
+        result = _parse_json('{"score": 0.85, "feedback": "good", "retry_with": "done"}')
+        assert result["score"] == 0.85
+
+    def test_markdown_fenced_json_parses(self):
+        from kimiflow.agents import _parse_json
+        raw = '```json\n{"score": 0.7, "feedback": "ok"}\n```'
+        result = _parse_json(raw)
+        assert result["score"] == 0.7
+
+    def test_literal_newline_in_feedback_parses(self):
+        """scaleway/gpt-oss-120b returns multiline feedback — this was failing."""
+        from kimiflow.agents import _parse_json
+        raw = '{"score": 0.6, "feedback": "Line one.\nLine two.\nLine three.", "retry_with": "coder"}'
+        result = _parse_json(raw)
+        assert result["score"] == 0.6
+        assert "Line one" in result["feedback"]
+
+    def test_literal_tab_in_feedback_parses(self):
+        from kimiflow.agents import _parse_json
+        raw = '{"score": 0.5, "feedback": "col1\tcol2", "retry_with": "coder"}'
+        result = _parse_json(raw)
+        assert result["score"] == 0.5
+
+    def test_trailing_prose_after_json_parses(self):
+        from kimiflow.agents import _parse_json
+        raw = 'Here is my evaluation:\n{"score": 0.9, "feedback": "pass"}\n\nNote: looks good.'
+        result = _parse_json(raw)
+        assert result["score"] == 0.9
+
+    def test_truly_malformed_returns_zero_score(self):
+        from kimiflow.agents import _parse_json
+        result = _parse_json("not json at all")
+        assert result["score"] == 0.0
+        assert "malformed" in result["feedback"].lower()

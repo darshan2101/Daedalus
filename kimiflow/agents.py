@@ -4,6 +4,7 @@
 import json
 import time
 import openai
+import re
 from models import (
     OPENROUTER_BASE, OPENROUTER_KEY,
     GROQ_BASE, GROQ_KEY, GROQ_MODEL,
@@ -44,6 +45,10 @@ fastapi>=0.95.0
 """
 
 
+def _strip_fences(content: str) -> str:
+    return re.sub(r'^```[a-z]*\n?', '', content, flags=re.MULTILINE).replace('```', '').strip()
+
+
 def _call(base_url, api_key, model, system, user, temperature=0.7):
     """Single model call with None-content guard."""
     client = openai.OpenAI(base_url=base_url, api_key=api_key)
@@ -58,7 +63,7 @@ def _call(base_url, api_key, model, system, user, temperature=0.7):
     content = resp.choices[0].message.content
     if content is None:
         raise ValueError(f"Model {model} returned None content")
-    return content.strip()
+    return _strip_fences(content.strip())
 
 
 _groq_disabled = False
@@ -186,6 +191,12 @@ def _parse_json(raw):
         e = cleaned.rfind("}") + 1
         if s != -1 and e > 0:
             cleaned = cleaned[s:e]
+        # Sanitize literal control characters that break json.loads inside string values.
+        # JSON spec forbids unescaped newlines/tabs in strings; replace with spaces.
+        # Structural whitespace between tokens is unaffected — json.loads handles it fine.
+        cleaned = cleaned.replace('\r\n', ' ').replace('\r', ' ')
+        cleaned = re.sub(r'(?<!\\)\n', ' ', cleaned)
+        cleaned = re.sub(r'(?<!\\)\t', ' ', cleaned)
         return json.loads(cleaned)
     except (json.JSONDecodeError, ValueError) as exc:
         print(f"  [_parse_json] WARNING: malformed JSON from model — {exc}")
@@ -253,6 +264,7 @@ def orchestrator_plan(task: str) -> dict:
         "  fast     → trivial tasks, single lookups, yes/no, short answers\n\n"
         "Output ONLY valid JSON, no markdown:\n"
         '{"plan": "<one sentence plan>", "assigned_model": "<specialist>"}'
+        "\nSTRICT: Output raw text only. Never use triple backticks or markdown fences of any kind (no ```go, ```python, ```javascript, ```json, or ``` alone). Violation causes downstream parse failure."
     )
     raw = _call_with_circuit_breaker(ORCHESTRATOR_MODELS, system, task, temperature=0.2)
     return _parse_json(raw)
@@ -293,6 +305,7 @@ def coder_execute(plan: str, task: str, feedback: str = "") -> str:
         f"Plan: {plan}"
         f"{feedback_block}"
         f"\n{FILE_FORMAT_INSTRUCTION}"
+        "\nSTRICT: Output raw text only. Never use triple backticks or markdown fences of any kind (no ```go, ```python, ```javascript, ```json, or ``` alone). Violation causes downstream parse failure."
     )
     return _call_with_circuit_breaker(CODER_MODELS, system, task)
 
@@ -330,6 +343,7 @@ def reasoner_execute(plan: str, task: str, feedback: str = "") -> str:
         "Be thorough and precise.\n"
         f"Plan: {plan}"
         f"{feedback_block}"
+        "\nSTRICT: Output raw text only. Never use triple backticks or markdown fences of any kind (no ```go, ```python, ```javascript, ```json, or ``` alone). Violation causes downstream parse failure."
     )
     return _call_with_circuit_breaker(REASONER_MODELS, system, task)
 
@@ -366,6 +380,7 @@ def drafter_execute(plan: str, task: str, feedback: str = "") -> str:
         "Produce clear, well-structured, polished output.\n"
         f"Plan: {plan}"
         f"{feedback_block}"
+        "\nSTRICT: Output raw text only. Never use triple backticks or markdown fences of any kind (no ```go, ```python, ```javascript, ```json, or ``` alone). Violation causes downstream parse failure."
     )
     return _call_with_circuit_breaker(DRAFTER_MODELS, system, task)
 
@@ -402,6 +417,7 @@ def creative_execute(plan: str, task: str, feedback: str = "") -> str:
         "Think outside the box. Be original, expressive, and engaging.\n"
         f"Plan: {plan}"
         f"{feedback_block}"
+        "\nSTRICT: Output raw text only. Never use triple backticks or markdown fences of any kind (no ```go, ```python, ```javascript, ```json, or ``` alone). Violation causes downstream parse failure."
     )
     return _call_with_circuit_breaker(CREATIVE_MODELS, system, task)
 
@@ -437,6 +453,7 @@ def fast_execute(plan: str, task: str, feedback: str = "") -> str:
         "Answer quickly and concisely. No padding, no repetition.\n"
         f"Plan: {plan}"
         f"{feedback_block}"
+        "\nSTRICT: Output raw text only. Never use triple backticks or markdown fences of any kind (no ```go, ```python, ```javascript, ```json, or ``` alone). Violation causes downstream parse failure."
     )
     return _call_with_circuit_breaker(FAST_MODELS, system, task)
 
@@ -453,6 +470,7 @@ def groq_draft(plan: str, task: str, feedback: str = "") -> str:
         f"Plan: {plan}"
         f"{feedback_block}"
         f"\n{FILE_FORMAT_INSTRUCTION}"
+        "\nSTRICT: Output raw text only. Never use triple backticks or markdown fences of any kind (no ```go, ```python, ```javascript, ```json, or ``` alone). Violation causes downstream parse failure."
     )
     return _call_with_circuit_breaker(["__groq__"], system, task)
 
@@ -493,6 +511,7 @@ def evaluator_score(task: str, result: str) -> dict:
         "  coder / reasoner / drafter / creative / fast\n"
         "IMPORTANT: If the task requires generating files/code, the result MUST contain\n"
         "structured file blocks using '--- FILE: path ---' delimiters to score above 0.5.\n"
+        "\nSTRICT: Output raw text only. Never use triple backticks or markdown fences of any kind (no ```go, ```python, ```javascript, ```json, or ``` alone). Violation causes downstream parse failure."
         "Output ONLY valid JSON, no markdown:\n"
         '{"score": 0.0, "feedback": "<why>", "retry_with": "<specialist|done>"}'
     )

@@ -126,11 +126,34 @@ def test_aggregate_docs_preset_with_docs_output_type_uses_docs(
 ):
     """Complement: preset='docs' AND output_type='docs' must use _aggregate_docs."""
     monkeypatch.setattr("daedalus.aggregator.get_run_dir", lambda r: str(tmp_path))
-    
+
     mock_state["preset"] = "docs"
     mock_state["output_type"] = "docs"
-    
+
     updated_state = aggregate("test_run_123", mock_state, {})
-    
+
     # Should have routed to _aggregate_docs and populated FINAL.md
     assert "FINAL.md" in updated_state["output_path"]
+
+
+def test_aggregate_modular_output_type_uses_code_aggregator(
+    mock_state, tmp_path, monkeypatch
+):
+    """output_type='modular' with preset='default' must route to _aggregate_code."""
+    monkeypatch.setattr("daedalus.aggregator.get_run_dir", lambda r: str(tmp_path))
+
+    mock_state["preset"] = "default"
+    mock_state["output_type"] = "modular"
+    mock_state["agent_results"]["ag_1"] = {
+        "result": (
+            "--- FILE: jwt_test.go ---\npackage main\nimport \"testing\"\n--- END FILE ---\n\n"
+            "--- FILE: jwt.go ---\npackage main\n--- END FILE ---"
+        )
+    }
+
+    updated_state = aggregate("test_run_123", mock_state, {})
+
+    # Must route to _aggregate_code and extract FILE blocks
+    assert "final_code" in updated_state["output_path"]
+    assert "### File: `jwt_test.go`" in updated_state["combined_result"]
+    assert "### File: `jwt.go`" in updated_state["combined_result"]

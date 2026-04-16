@@ -122,9 +122,41 @@ async def execute_node(state: DaedalusGraphState) -> DaedalusGraphState:
                     return
                 any_ran = True
                 
-                from daedalus.major_agent import MajorAgent
-                major = MajorAgent(agent, config, run_state)
-                result = await major.run()
+                if agent.get("output_type") == "modular":
+                    console.print(f"  [bold green]🛠️ Delegating {agent['agent_id']} to Modular Generation Engine[/]")
+                    from daedalus.component_generator import ComponentGenerator
+                    from kimiflow.agents import drafter_execute, coder_execute, evaluator_score
+                    from daedalus.test_validator import TestValidator
+                    
+                    validator = TestValidator()
+                    
+                    async def async_drafter(*args, **kwargs):
+                        return await asyncio.to_thread(drafter_execute, *args, **kwargs)
+                        
+                    async def async_coder(*args, **kwargs):
+                        return await asyncio.to_thread(coder_execute, *args, **kwargs)
+                        
+                    async def async_evaluator(*args, **kwargs):
+                        return await asyncio.to_thread(evaluator_score, *args, **kwargs)
+
+                    async def async_fast(tests_code, impl_code):
+                        return await validator.validate_module(".", tests_code, impl_code)
+
+                    generator = ComponentGenerator(
+                        config=config,
+                        drafter_fn=async_drafter,
+                        coder_fn=async_coder,
+                        fast_fn=async_fast,
+                        evaluator_fn=async_evaluator
+                    )
+                    
+                    result = await generator.generate_module(agent)
+                    if "quality_score" not in result:
+                        result["quality_score"] = result.get("score", 0.0)
+                else:
+                    from daedalus.major_agent import MajorAgent
+                    major = MajorAgent(agent, config, run_state)
+                    result = await major.run()
                 
                 if result.get("status") != "error":
                     run_state["agent_results"][agent["agent_id"]] = result

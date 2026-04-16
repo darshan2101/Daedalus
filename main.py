@@ -158,12 +158,9 @@ async def main_async():
     if use_langgraph:
         console.print(f"\n[bold yellow]Phase 2: LangGraph Orchestration[/]")
         try:
-            if args.resume:
-                from daedalus.graph import build_resume_graph
-                graph = build_resume_graph(config)
-            else:
-                from daedalus.graph import build_daedalus_graph
-                graph = build_daedalus_graph(config)
+            # Fix 1: We already did plan_goal in main.py. Skip the plan_node entirely.
+            from daedalus.graph import build_resume_graph
+            graph = build_resume_graph(config)
 
             # Build the graph input state
             graph_state = {
@@ -187,13 +184,16 @@ async def main_async():
                 "system_iteration": run_state.get("system_iteration", 0),
                 "repair_attempts": run_state.get("repair_attempts", 0),
                 "any_agent_ran": True,
-                "current_step": "plan" if not args.resume else "executing",
+                "current_step": "executing",
                 "errors": [],
                 "should_repair": False,
                 "done": False,
             }
 
-            final_state = await graph.ainvoke(graph_state)
+            final_state = await graph.ainvoke(
+                graph_state,
+                config={"recursion_limit": 100}
+            )
             from infra.mongo_client import update_run_status
             await update_run_status(run_id, "done", final_state)
             

@@ -120,3 +120,79 @@ async def test_evaluate_node_persists_state():
             state_update = args[2]
             assert state_update["system_iteration"] == 2
             assert state_update["repair_attempts"] == 1
+
+
+@pytest.mark.asyncio
+async def test_execute_node_modular_injection():
+    """execute_node branches to ComponentGenerator for modular-enabled config."""
+    from daedalus.graph import execute_node
+    from unittest.mock import AsyncMock, patch
+
+    state = {
+        "run_id": "r1",
+        "goal": "test",
+        "preset": "standard",
+        "config": {"runtime": {"max_parallel_major": 1}},
+        "agent_specs": [],
+        "dep_graph": {}
+    }
+
+    class MockCoordinator:
+        def __init__(self, *args, **kwargs):
+            pass
+        def get_execution_waves(self):
+            return [[{"agent_id": "ag_1", "output_type": "modular"}]]
+
+    with patch("daedalus.coordinator.GlobalCoordinator", new=MockCoordinator):
+        with patch("daedalus.component_generator.ComponentGenerator") as MockCG:
+            with patch("daedalus.major_agent.MajorAgent") as MockMA:
+                MockMA.return_value.run = AsyncMock(return_value={"status": "complete", "quality_score": 0.9})
+                with patch("infra.mongo_client.update_run_status", new_callable=AsyncMock):
+                    with patch("infra.redis_client.freeze_agent"):
+                        with patch("infra.redis_client.is_frozen", return_value=False):
+                            
+                            mock_cg_instance = MockCG.return_value
+                            mock_cg_instance.generate_module = AsyncMock(return_value={
+                                "status": "complete", "score": 0.9, "quality_score": 0.9
+                            })
+                            
+                            await execute_node(state)
+                            
+                            assert MockCG.called, "ComponentGenerator should be instantiated"
+                            assert mock_cg_instance.generate_module.called, "generate_module should be invoked"
+                            assert not MockMA.called, "MajorAgent must be bypassed"
+
+
+@pytest.mark.asyncio
+async def test_execute_node_code_output_type_uses_major_agent():
+    """output_type='code' must route to MajorAgent, NOT ComponentGenerator."""
+    from daedalus.graph import execute_node
+    from unittest.mock import AsyncMock, patch
+
+    state = {
+        "run_id": "r1",
+        "goal": "test",
+        "preset": "standard",
+        "config": {"runtime": {"max_parallel_major": 1}},
+        "agent_specs": [],
+        "dep_graph": {}
+    }
+
+    class MockCoordinator:
+        def __init__(self, *args, **kwargs):
+            pass
+        def get_execution_waves(self):
+            return [[{"agent_id": "ag_1", "output_type": "code"}]]
+
+    with patch("daedalus.coordinator.GlobalCoordinator", new=MockCoordinator):
+        with patch("daedalus.component_generator.ComponentGenerator") as MockCG:
+            with patch("daedalus.major_agent.MajorAgent") as MockMA:
+                MockMA.return_value.run = AsyncMock(return_value={"status": "complete", "quality_score": 0.9})
+                with patch("infra.mongo_client.update_run_status", new_callable=AsyncMock):
+                    with patch("infra.redis_client.freeze_agent"):
+                        with patch("infra.redis_client.is_frozen", return_value=False):
+
+                            await execute_node(state)
+
+                            assert MockMA.called, "MajorAgent should be used for output_type='code'"
+                            assert not MockCG.called, "ComponentGenerator must NOT be used for output_type='code'"

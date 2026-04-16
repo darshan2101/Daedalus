@@ -126,7 +126,7 @@ def aggregate(run_id: str, state: RunState, config: dict) -> RunState:
     preset = state.get("preset", "default")
     
     # Use code extraction if the run produced code output (regardless of preset)
-    if output_type in ("code",) or preset in ("saas", "code"):
+    if output_type in ("code", "modular") or preset in ("saas", "code"):
         combined_text, out_path = _aggregate_code(run_id, state)
     else:
         combined_text, out_path = _aggregate_docs(run_id, state)

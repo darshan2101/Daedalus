@@ -24,7 +24,7 @@ wheels/
 pip-wheel-metadata/
 *.egg-link
 .installed.cfg
-
+old_benchmarks/
 # ── Virtual environments ────────────────────────────────────────────────────────
 .venv/
 venv/

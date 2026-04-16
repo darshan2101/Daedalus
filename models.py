@@ -63,7 +63,6 @@ REASONER_MODELS = [
 # ── DRAFTER ───────────────────────────────────────────────────────────────────
 # Needs: fast reliable text output, writing, summaries
 DRAFTER_MODELS = [
-    "google/gemma-3-27b-it:free",                    # primary — confirmed working
     "__scaleway__:mistral-small-3.2-24b-instruct-2506", # Scaleway Mistral
     "__scaleway__:llama-3.3-70b-instruct",           # Scaleway Llama
     "__groq__:llama-3.1-8b-instant",                 # Groq fast fallback
@@ -78,7 +77,6 @@ DRAFTER_MODELS = [
 CREATIVE_MODELS = [
     "cognitivecomputations/dolphin-mistral-24b-venice-edition:free",  # P1: unique primary
     "__groq__",
-    "google/gemma-3-27b-it:free",
     "arcee-ai/trinity-large-preview:free",
     "openrouter/free",                               # last-resort auto-router
 ]

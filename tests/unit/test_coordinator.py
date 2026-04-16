@@ -147,3 +147,77 @@ async def test_wave_delay_stagger_execution(monkeypatch):
         # Index 0 gets no sleep. Index 1 gets sleep(5). Index 2 gets sleep(5).
         assert mock_sleep.call_count == 2
         mock_sleep.assert_called_with(5)
+
+
+@pytest.mark.asyncio
+async def test_coordinator_modular_injection(monkeypatch):
+    """Coordinator branches to ComponentGenerator for modular-enabled config."""
+    from unittest.mock import AsyncMock, patch
+    
+    state = {
+        "run_id": "test",
+        "agent_specs": [{"agent_id": "ag_1", "task": "t1", "output_type": "modular"}],
+        "dep_graph": {}
+    }
+    
+    config = {}
+    
+    monkeypatch.setattr("daedalus.coordinator.update_run_status", AsyncMock())
+    monkeypatch.setattr("daedalus.coordinator.is_frozen", lambda *args: False)
+    monkeypatch.setattr("daedalus.coordinator.freeze_agent", lambda *args: None)
+    monkeypatch.setattr("daedalus.merger.detect_and_resolve_all", AsyncMock(return_value=([], {})))
+    monkeypatch.setattr("daedalus.aggregator.aggregate", lambda r, s, c: s)
+    monkeypatch.setattr("daedalus.evaluator.evaluate_run", lambda r, s, c: s)
+    monkeypatch.setattr("daedalus.repair.repair_if_needed", lambda r, s, c: (False, s))
+    
+    from daedalus.coordinator import GlobalCoordinator
+    coord = GlobalCoordinator(state, config)
+    
+    with patch("daedalus.component_generator.ComponentGenerator") as MockCG:
+        with patch("daedalus.major_agent.MajorAgent") as MockMA:
+            # We explicitly define the run mock for MajorAgent to avoid un-awaitable TypeErrors in case of failure fallback
+            MockMA.return_value.run = AsyncMock(return_value={"status": "complete", "quality_score": 0.95})
+
+            mock_cg_instance = MockCG.return_value
+            mock_cg_instance.generate_module = AsyncMock(return_value={"status": "complete", "quality_score": 0.95})
+            
+            await coord.run()
+            
+            assert MockCG.called, "ComponentGenerator should be instantiated instead of MajorAgent"
+            assert mock_cg_instance.generate_module.called, "generate_module should be invoked"
+            assert not MockMA.called, "MajorAgent must be bypassed entirely"
+
+
+@pytest.mark.asyncio
+async def test_coordinator_code_output_type_uses_major_agent(monkeypatch):
+    """output_type='code' must route to MajorAgent, NOT ComponentGenerator."""
+    from unittest.mock import AsyncMock, patch
+
+    state = {
+        "run_id": "test",
+        "agent_specs": [{"agent_id": "ag_1", "task": "t1", "output_type": "code"}],
+        "dep_graph": {}
+    }
+
+    config = {}
+
+    monkeypatch.setattr("daedalus.coordinator.update_run_status", AsyncMock())
+    monkeypatch.setattr("daedalus.coordinator.is_frozen", lambda *args: False)
+    monkeypatch.setattr("daedalus.coordinator.freeze_agent", lambda *args: None)
+    monkeypatch.setattr("daedalus.merger.detect_and_resolve_all", AsyncMock(return_value=([], {})))
+    monkeypatch.setattr("daedalus.aggregator.aggregate", lambda r, s, c: s)
+    monkeypatch.setattr("daedalus.evaluator.evaluate_run", lambda r, s, c: s)
+    monkeypatch.setattr("daedalus.repair.repair_if_needed", lambda r, s, c: (False, s))
+
+    from daedalus.coordinator import GlobalCoordinator
+    coord = GlobalCoordinator(state, config)
+
+    with patch("daedalus.component_generator.ComponentGenerator") as MockCG:
+        with patch("daedalus.major_agent.MajorAgent") as MockMA:
+            MockMA.return_value.run = AsyncMock(return_value={"status": "complete", "quality_score": 0.9})
+
+            await coord.run()
+
+            assert MockMA.called, "MajorAgent should be used for output_type='code'"
+            assert not MockCG.called, "ComponentGenerator must NOT be used for output_type='code'"
+

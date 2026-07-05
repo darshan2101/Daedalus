@@ -13,7 +13,7 @@ GROQ_MODEL = "llama-3.3-70b-versatile"   # Groq Llama — unbreakable backup
 
 CEREBRAS_BASE  = "https://api.cerebras.ai/v1"
 CEREBRAS_KEY   = os.getenv("CEREBRAS_API_KEY")
-CEREBRAS_MODEL = "llama3.1-8b"           # Cerebras — 2.88M RPD, effectively unlimited
+CEREBRAS_MODEL = "gemma-4-31b"           # Cerebras — 2.88M RPD, effectively unlimited (live id 2026-07-05)
 
 SCALEWAY_BASE  = "https://api.scaleway.ai/v1"
 SCALEWAY_KEY   = os.getenv("SCALEWAY_SECRET_KEY")
@@ -36,14 +36,13 @@ ORCHESTRATOR_MODELS = [
 # ── CODER / TOOL CALLER ───────────────────────────────────────────────────────
 # Needs: code generation, tool calling, API integration, structured output
 CODER_MODELS = [
-    "z-ai/glm-4.5-air:free",                         # primary — confirmed working
-    "__cerebras__:qwen-3-235b-a22b-instruct-2507",   # Cerebras 235B coder
-    "__nvidia__:qwen/qwen2.5-coder-32b-instruct",    # Nvidia NIM coder
+    "__cerebras__:gpt-oss-120b",                     # primary — Cerebras direct (fast, ~unlimited); led with direct after qwen3-coder:free 429'd
+    "__nvidia__:qwen/qwen3-next-80b-a3b-instruct",   # Nvidia NIM coder (live id 2026-07-05)
     "__scaleway__:qwen3-coder-30b-a3b-instruct",     # Scaleway coder
     "__groq__:llama-3.1-8b-instant",                 # Groq fast fallback
+    "qwen/qwen3-coder:free",                         # 480B MoE SOTA coder (OpenRouter free — 429s under load; demoted off primary 2026-07-05)
     "mistralai/mistral-small-3.1-24b-instruct:free", # reliable Mistral
     "nvidia/nemotron-3-super-120b-a12b:free",        # 120B MoE — solid coding
-    "qwen/qwen3-coder:free",                         # 480B MoE — SOTA code generation
     "openrouter/free",                               # last-resort auto-router
 ]
 
@@ -51,9 +50,9 @@ CODER_MODELS = [
 # Needs: multi-step analysis, long context, depth
 REASONER_MODELS = [
     "__groq__:llama-3.1-8b-instant",                 # primary — Groq 8B direct (separate RPD)
-    "__cerebras__:llama3.1-8b",                      # Cerebras 2.88M RPD fallback
+    "__cerebras__:gemma-4-31b",                      # Cerebras 2.88M RPD fallback (live id 2026-07-05)
     "__nvidia__:meta/llama-4-maverick-17b-128e-instruct", # Nvidia Maverick
-    "__scaleway__:llama-3.1-8b-instruct",            # Scaleway burst
+    "__scaleway__:llama-3.3-70b-instruct",           # Scaleway burst (no 8B on Scaleway; live id 2026-07-05)
     "meta-llama/llama-3.3-70b-instruct:free",
     "stepfun/step-3.5-flash:free",                   # 196B MoE
     "nvidia/nemotron-3-super-120b-a12b:free",
@@ -66,7 +65,7 @@ DRAFTER_MODELS = [
     "__scaleway__:mistral-small-3.2-24b-instruct-2506", # Scaleway Mistral
     "__scaleway__:llama-3.3-70b-instruct",           # Scaleway Llama
     "__groq__:llama-3.1-8b-instant",                 # Groq fast fallback
-    "z-ai/glm-4.5-air:free",                         # GLM — confirmed working
+    "qwen/qwen3-next-80b-a3b-instruct:free",         # glm-4.5-air:free dead 404; live id 2026-07-05
     "mistralai/mistral-small-3.1-24b-instruct:free",
     "meta-llama/llama-3.3-70b-instruct:free",
     "openrouter/free",                               # last-resort auto-router
@@ -75,8 +74,8 @@ DRAFTER_MODELS = [
 # ── CREATIVE ──────────────────────────────────────────────────────────────────
 # Needs: imaginative output, expressive writing, brainstorming
 CREATIVE_MODELS = [
-    "cognitivecomputations/dolphin-mistral-24b-venice-edition:free",  # P1: unique primary
-    "__groq__",
+    "__groq__",                                      # primary — Groq direct (led with direct per AGENTS.md after coder-role 429 evidence)
+    "cognitivecomputations/dolphin-mistral-24b-venice-edition:free",  # unique creative voice (OpenRouter free — herd-prone)
     "arcee-ai/trinity-large-preview:free",
     "openrouter/free",                               # last-resort auto-router
 ]
@@ -85,8 +84,8 @@ CREATIVE_MODELS = [
 # Needs: speed, low latency, good enough for trivial tasks
 FAST_MODELS = [
     "nvidia/nemotron-3-nano-30b-a3b:free",           # primary — fast nano model
-    "__cerebras__:llama3.1-8b",                      # Cerebras 2.88M RPD
-    "__scaleway__:llama-3.1-8b-instruct",            # Scaleway burst
+    "__cerebras__:gemma-4-31b",                      # Cerebras 2.88M RPD (live id 2026-07-05)
+    "__scaleway__:llama-3.3-70b-instruct",           # Scaleway burst (no 8B on Scaleway; live id 2026-07-05)
     "__groq__:llama-3.1-8b-instant",                 # Groq fast
     "google/gemma-3-12b-it:free",
     "openrouter/free",                               # last-resort auto-router
@@ -97,7 +96,7 @@ FAST_MODELS = [
 EVALUATOR_MODELS = [
     "nvidia/nemotron-3-super-120b-a12b:free",        # primary — confirmed evaluator
     "__scaleway__:gpt-oss-120b",                     # Scaleway GPT-OSS
-    "__cerebras__:qwen-3-235b-a22b-instruct-2507",   # Cerebras 235B
+    "__cerebras__:gpt-oss-120b",                     # Cerebras 120B (live id 2026-07-05)
     "__groq__",                                      # Groq llama-3.3-70b
     "meta-llama/llama-3.3-70b-instruct:free",
     "nousresearch/hermes-3-llama-3.1-405b:free",
